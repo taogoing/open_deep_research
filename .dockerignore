@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.venv
+node_modules
+frontend
+nginx.conf
+docker-compose.yml
+Dockerfile
+.dockerignore
+.claude
+.env

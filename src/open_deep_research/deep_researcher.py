@@ -1,6 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -330,16 +331,9 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 update_payload["raw_notes"] = [raw_notes_concat]
                 
         except Exception as e:
-            # Handle research execution errors
-            if is_token_limit_exceeded(e, configurable.research_model) or True:
-                # Token limit exceeded or other error - end research phase
-                return Command(
-                    goto=END,
-                    update={
-                        "notes": get_notes_from_tool_calls(supervisor_messages),
-                        "research_brief": state.get("research_brief", "")
-                    }
-                )
+            # A failed research phase must not be presented as a successful empty report.
+            logging.exception("Research execution failed")
+            raise RuntimeError(f"Research execution failed: {e}") from e
     
     # Step 3: Return command with all tool results
     update_payload["supervisor_messages"] = all_tool_messages
@@ -350,7 +344,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
 
 # Supervisor Subgraph Construction
 # Creates the supervisor workflow that manages research delegation and coordination
-supervisor_builder = StateGraph(SupervisorState, config_schema=Configuration)
+supervisor_builder = StateGraph(SupervisorState, context_schema=Configuration)
 
 # Add supervisor nodes for research management
 supervisor_builder.add_node("supervisor", supervisor)           # Main supervisor logic
@@ -472,10 +466,13 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     
     # Execute all tool calls in parallel
     tool_calls = most_recent_message.tool_calls
-    tool_execution_tasks = [
-        execute_tool_safely(tools_by_name[tool_call["name"]], tool_call["args"], config) 
-        for tool_call in tool_calls
-    ]
+    async def execute_tool_call(tool_call):
+        selected_tool = tools_by_name.get(tool_call["name"])
+        if selected_tool is None:
+            return f"Error executing tool: unknown tool '{tool_call['name']}'"
+        return await execute_tool_safely(selected_tool, tool_call["args"], config)
+
+    tool_execution_tasks = [execute_tool_call(call) for call in tool_calls]
     observations = await asyncio.gather(*tool_execution_tasks)
     
     # Create tool messages from execution results
@@ -532,7 +529,8 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     })
     
     # Step 2: Prepare messages for compression
-    researcher_messages = state.get("researcher_messages", [])
+    # Do not mutate the message list owned by the LangGraph state/checkpoint.
+    researcher_messages = list(state.get("researcher_messages", []))
     
     # Add instruction to switch from research mode to compression mode
     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
@@ -587,9 +585,9 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
 # Researcher Subgraph Construction
 # Creates individual researcher workflow for conducting focused research on specific topics
 researcher_builder = StateGraph(
-    ResearcherState, 
-    output=ResearcherOutputState, 
-    config_schema=Configuration
+    ResearcherState,
+    output_schema=ResearcherOutputState,
+    context_schema=Configuration
 )
 
 # Add researcher nodes for research execution and compression
@@ -699,9 +697,9 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
 # Main Deep Researcher Graph Construction
 # Creates the complete deep research workflow from user input to final report
 deep_researcher_builder = StateGraph(
-    AgentState, 
-    input=AgentInputState, 
-    config_schema=Configuration
+    AgentState,
+    input_schema=AgentInputState,
+    context_schema=Configuration
 )
 
 # Add main workflow nodes for the complete research process

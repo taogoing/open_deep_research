@@ -40,6 +40,9 @@ uv pip install -r pyproject.toml
 cp .env.example .env
 ```
 
+The default local configuration uses `deepseek:deepseek-chat` with Tavily, so
+set both `DEEPSEEK_API_KEY` and `TAVILY_API_KEY` in `.env` before starting.
+
 4. Launch agent with the LangGraph server locally:
 
 ```bash
@@ -63,10 +66,10 @@ Ask a question in the `messages` input field and click `Submit`. Select differen
 
 Open Deep Research supports a wide range of LLM providers via the [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/). It uses LLMs for a few different tasks. See the below model fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI. 
 
-- **Summarization** (default: `openai:gpt-4.1-mini`): Summarizes search API results
-- **Research** (default: `openai:gpt-4.1`): Power the search agent
-- **Compression** (default: `openai:gpt-4.1`): Compresses research findings
-- **Final Report Model** (default: `openai:gpt-4.1`): Write the final report
+- **Summarization** (default: `deepseek:deepseek-chat`): Summarizes search API results
+- **Research** (default: `deepseek:deepseek-chat`): Powers the search agent
+- **Compression** (default: `deepseek:deepseek-chat`): Compresses research findings
+- **Final Report Model** (default: `deepseek:deepseek-chat`): Writes the final report
 
 > Note: the selected model will need to support [structured outputs](https://python.langchain.com/docs/integrations/chat/) and [tool calling](https://python.langchain.com/docs/how_to/tool_calling/).
 
@@ -131,19 +134,3 @@ We've deployed Open Deep Research to our public demo instance of OAP. All you ne
 You can also deploy your own instance of OAP, and make your own custom agents (like Deep Researcher) available on it to your users.
 1. [Deploy Open Agent Platform](https://docs.oap.langchain.com/quickstart)
 2. [Add Deep Researcher to OAP](https://docs.oap.langchain.com/setup/agents)
-
-### Legacy Implementations 🏛️
-
-The `src/legacy/` folder contains two earlier implementations that provide alternative approaches to automated research. They are less performant than the current implementation, but provide alternative ideas understanding the different approaches to deep research.
-
-#### 1. Workflow Implementation (`legacy/graph.py`)
-- **Plan-and-Execute**: Structured workflow with human-in-the-loop planning
-- **Sequential Processing**: Creates sections one by one with reflection
-- **Interactive Control**: Allows feedback and approval of report plans
-- **Quality Focused**: Emphasizes accuracy through iterative refinement
-
-#### 2. Multi-Agent Implementation (`legacy/multi_agent.py`)  
-- **Supervisor-Researcher Architecture**: Coordinated multi-agent system
-- **Parallel Processing**: Multiple researchers work simultaneously
-- **Speed Optimized**: Faster report generation through concurrency
-- **MCP Support**: Extensive Model Context Protocol integration

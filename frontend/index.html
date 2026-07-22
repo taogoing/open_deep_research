@@ -1,0 +1,1383 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Open Deep Research</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+/* ── Design Tokens ──────────────────────────────────────── */
+:root {
+  --primary:#6366f1; --primary-dark:#4f46e5; --primary-light:#a5b4fc;
+  --accent:#8b5cf6; --success:#10b981; --warning:#f59e0b; --danger:#ef4444;
+  --bg:#ffffff; --bg-subtle:#f8fafc; --bg-muted:#f1f5f9;
+  --text:#0f172a; --text-s:#475569; --text-m:#94a3b8;
+  --border:#e2e8f0; --border-s:#f1f5f9;
+  --r:14px; --r-sm:10px; --r-xs:6px;
+  --sh-sm:0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
+  --sh:0 4px 16px rgba(99,102,241,.1),0 1px 4px rgba(0,0,0,.06);
+  --sh-lg:0 12px 32px rgba(99,102,241,.15),0 4px 8px rgba(0,0,0,.08);
+  --user-grad:linear-gradient(135deg,#6366f1,#8b5cf6);
+  --logo-grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 60%,#a78bfa 100%);
+  --sidebar-w:288px;
+}
+[data-theme="dark"]{
+  --bg:#0c0f1e; --bg-subtle:#131829; --bg-muted:#1a2238;
+  --text:#eef2ff; --text-s:#8b9ec7; --text-m:#3d5080;
+  --border:#1e2d4a; --border-s:#131829;
+  --sh-sm:0 1px 3px rgba(0,0,0,.35); --sh:0 4px 16px rgba(0,0,0,.45);
+  --sh-lg:0 12px 32px rgba(0,0,0,.55);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",Roboto,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer}
+
+/* ── Layout ─────────────────────────────────────────────── */
+.app{display:flex;height:100vh;overflow:hidden}
+.main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+
+/* ── Sidebar ────────────────────────────────────────────── */
+.sidebar{
+  width:var(--sidebar-w);min-width:var(--sidebar-w);
+  background:var(--bg-subtle);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;transition:width .25s ease,min-width .25s ease;
+  overflow:hidden;
+}
+.sidebar.collapsed{width:60px;min-width:60px}
+.sidebar-header{
+  padding:14px 10px 10px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;gap:6px;
+  white-space:nowrap;
+}
+.sidebar.collapsed .sidebar-header{padding:12px 6px;flex-direction:column;gap:8px}
+.logo{display:flex;align-items:center;gap:8px;overflow:hidden;min-width:0;flex-shrink:1}
+.sidebar.collapsed .logo{justify-content:center}
+.logo-icon{
+  width:32px;height:32px;border-radius:9px;flex-shrink:0;
+  background:var(--user-grad);display:flex;align-items:center;justify-content:center;
+}
+.logo-icon svg{width:17px;height:17px;color:#fff;stroke:currentColor}
+.logo-text{overflow:hidden;transition:opacity .15s,max-width .2s;max-width:140px}
+.sidebar.collapsed .logo-text{opacity:0;max-width:0}
+.logo-text h1{font-size:14px;font-weight:700;background:var(--logo-grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.logo-text p{font-size:10px;color:var(--text-m);margin-top:1px}
+.btn-new{
+  display:flex;align-items:center;gap:5px;
+  padding:6px 11px;font-size:12px;font-weight:600;
+  background:var(--primary);color:#fff;border:none;
+  border-radius:var(--r-sm);transition:background .15s,box-shadow .15s;
+  white-space:nowrap;box-shadow:var(--sh-sm);overflow:hidden;
+}
+.btn-new:hover{background:var(--primary-dark);box-shadow:var(--sh)}
+.btn-new svg{width:13px;height:13px;stroke:currentColor;flex-shrink:0}
+.sidebar.collapsed .btn-new{padding:6px 8px;justify-content:center;width:36px}
+.sidebar.collapsed .btn-new .btn-new-label{display:none}
+.btn-collapse{
+  display:flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:6px;border:none;
+  background:none;color:var(--text-s);transition:color .15s,background .15s,transform .25s;flex-shrink:0;
+}
+.btn-collapse:hover{color:var(--text);background:var(--bg-muted)}
+.sidebar.collapsed .btn-collapse{transform:rotate(180deg)}
+.btn-collapse svg{width:15px;height:15px;stroke:currentColor}
+.thread-list{flex:1;overflow-y:auto;padding:6px;scrollbar-width:thin}
+.sidebar.collapsed .thread-list{padding:4px 2px}
+.thread-empty{padding:20px 14px;text-align:center;color:var(--text-m);font-size:11px;line-height:1.6}
+.sidebar.collapsed .thread-empty{display:none}
+.thread-item{
+  padding:9px 10px;border-radius:var(--r-sm);cursor:pointer;
+  margin-bottom:2px;transition:background .12s;color:var(--text);
+  display:flex;flex-direction:column;gap:2px;
+}
+.sidebar.collapsed .thread-item{padding:8px 4px;align-items:center;justify-content:center}
+.sidebar.collapsed .thread-title-text,.sidebar.collapsed .thread-time{display:none}
+.thread-item-icon{display:none}
+.sidebar.collapsed .thread-item-icon{
+  display:flex;width:26px;height:26px;border-radius:50%;
+  background:var(--bg-muted);align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;color:var(--text-s);
+}
+.sidebar.collapsed .thread-item.active .thread-item-icon{background:rgba(255,255,255,.2);color:#fff}
+.thread-item:hover{background:var(--bg-muted)}
+.thread-item.active{background:var(--user-grad);color:#fff;box-shadow:var(--sh)}
+.thread-title-text{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
+.thread-time{font-size:10px;color:var(--text-m)}
+.thread-item.active .thread-time{color:rgba(255,255,255,.6)}
+.sidebar-footer{
+  padding:10px 14px;border-top:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+}
+.sidebar.collapsed .sidebar-footer{flex-direction:column;gap:6px;padding:8px 4px}
+.sidebar.collapsed .btn-theme span,.sidebar.collapsed .btn-settings span{display:none}
+.btn-theme,.btn-settings{
+  display:flex;align-items:center;gap:6px;padding:7px 9px;
+  font-size:11px;color:var(--text-s);background:none;border:none;
+  border-radius:var(--r-xs);transition:color .15s,background .15s;
+}
+.btn-theme:hover,.btn-settings:hover{color:var(--text);background:var(--bg-muted)}
+.menu-btn{display:none;background:none;border:none;color:var(--text);padding:4px;border-radius:6px}
+.menu-btn svg{width:20px;height:20px;stroke:currentColor}
+
+/* ── Chat Header ────────────────────────────────────────── */
+.chat-header{
+  padding:11px 18px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:9px;background:var(--bg);
+  min-height:50px;
+}
+.chat-title{flex:1;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.header-status{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-m)}
+.status-dot{width:6px;height:6px;border-radius:50%;background:var(--success)}
+.status-dot.thinking{background:var(--primary);animation:pulse 1.4s ease infinite}
+.status-dot.failed{background:#ef4444}
+.header-actions{display:flex;align-items:center;gap:2px}
+.hdr-btn{
+  display:flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:6px;border:none;
+  background:none;color:var(--text-s);font-size:14px;
+  transition:color .15s,background .15s;
+}
+.hdr-btn:hover{color:var(--text);background:var(--bg-muted)}
+
+/* ── Messages ───────────────────────────────────────────── */
+.messages{flex:1;overflow-y:auto;padding:20px 18px;scrollbar-width:thin}
+.msg-row{display:flex;gap:9px;margin-bottom:18px;animation:fadeUp .25s ease}
+.msg-row.user{justify-content:flex-end}
+.msg-row.assistant{justify-content:flex-start}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.msg-avatar{
+  width:30px;height:30px;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;font-size:11px;font-weight:700;
+}
+.msg-row.user .msg-avatar{background:var(--user-grad);color:#fff;order:2}
+.msg-row.assistant .msg-avatar{background:var(--bg-muted);color:var(--text-s);border:1px solid var(--border)}
+.msg-row.assistant.streaming .msg-avatar{animation:avatarGlow 2s ease infinite}
+@keyframes avatarGlow{0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,0)}50%{box-shadow:0 0 0 4px rgba(99,102,241,.15)}}
+.msg-body{display:flex;flex-direction:column;gap:6px;max-width:80%;min-width:0}
+.msg-row.user .msg-body{align-items:flex-end}
+.msg-row.assistant .msg-body{align-items:flex-start}
+.msg-bubble{
+  padding:10px 14px;border-radius:var(--r);
+  font-size:13.5px;line-height:1.7;word-break:break-word;width:100%;
+}
+.msg-row.user .msg-bubble{background:var(--user-grad);color:#fff;border-bottom-right-radius:4px}
+.msg-row.assistant .msg-bubble{
+  background:var(--bg-subtle);border:1px solid var(--border);
+  color:var(--text);border-bottom-left-radius:4px;box-shadow:var(--sh-sm);
+}
+/* Markdown inside bubbles */
+.md h1,.md h2,.md h3{font-weight:700;margin:12px 0 5px;line-height:1.3}
+.md h1{font-size:1.2em}.md h2{font-size:1.08em}.md h3{font-size:1em}
+.md p{margin:4px 0}.md ul,.md ol{padding-left:20px;margin:5px 0}.md li{margin:2px 0}
+.md code{background:rgba(99,102,241,.1);padding:1px 5px;border-radius:3px;font-size:.87em;font-family:"SF Mono",Consolas,monospace;color:var(--primary-dark)}
+[data-theme="dark"] .md code{background:rgba(163,166,255,.12);color:var(--primary-light)}
+.md pre{background:var(--bg-muted);border:1px solid var(--border);padding:12px;border-radius:var(--r-sm);overflow-x:auto;margin:8px 0}
+.md pre code{background:none;padding:0;color:var(--text);font-size:.84em;line-height:1.55}
+.md blockquote{border-left:3px solid var(--primary);padding-left:12px;margin:8px 0;color:var(--text-s)}
+.md table{border-collapse:collapse;width:100%;margin:8px 0;font-size:.9em}
+.md th,.md td{border:1px solid var(--border);padding:6px 10px}
+.md th{background:var(--bg-muted);font-weight:600;text-align:left}
+.md a{color:var(--primary);text-decoration:underline;text-decoration-color:rgba(99,102,241,.3)}
+.md a:hover{text-decoration-color:var(--primary)}
+.msg-row.user .md code{background:rgba(255,255,255,.2);color:#fff}
+.msg-row.user .md pre{background:rgba(0,0,0,.15);border-color:rgba(255,255,255,.15)}
+.msg-row.user .md a{color:rgba(255,255,255,.9)}
+/* streaming cursor */
+.cursor::after{content:"▋";animation:blink 1s step-end infinite;color:var(--primary)}
+@keyframes blink{50%{opacity:0}}
+
+/* ── Step Indicator ─────────────────────────────────────── */
+.step-indicator{
+  display:flex;align-items:center;gap:3px;flex-wrap:wrap;
+  padding:6px 10px;background:var(--bg-muted);
+  border:1px solid var(--border);border-radius:var(--r-sm);
+  font-size:10px;margin-bottom:4px;
+}
+.step-chip{
+  display:flex;align-items:center;gap:3px;padding:2px 7px;
+  border-radius:16px;font-weight:500;transition:all .2s;
+  color:var(--text-m);background:transparent;
+}
+.step-chip.done{color:var(--success);background:rgba(16,185,129,.08)}
+.step-chip.active{color:var(--primary);background:rgba(99,102,241,.1);font-weight:600}
+.step-chip.failed{color:#dc2626;background:rgba(239,68,68,.08);font-weight:600}
+.step-dot{width:5px;height:5px;border-radius:50%;background:var(--text-m);flex-shrink:0}
+.step-chip.done .step-dot{background:var(--success)}
+.step-chip.active .step-dot{background:var(--primary);animation:pulse 1.2s ease infinite}
+.step-chip.failed .step-dot{background:#ef4444}
+
+/* ── Empty State ────────────────────────────────────────── */
+.empty{height:100%;display:flex;align-items:center;justify-content:center;padding:36px}
+.empty-inner{max-width:480px;width:100%;text-align:center}
+.empty-icon{
+  width:56px;height:56px;margin:0 auto 18px;border-radius:16px;
+  background:var(--user-grad);display:flex;align-items:center;justify-content:center;
+  box-shadow:var(--sh-lg);
+}
+.empty-icon svg{width:28px;height:28px;stroke:#fff}
+.empty h2{font-size:20px;font-weight:700;margin-bottom:7px;background:var(--logo-grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.empty p{font-size:13px;color:var(--text-s);line-height:1.6;margin-bottom:24px}
+.suggestion-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;text-align:left}
+.suggestion{
+  padding:11px 13px;background:var(--bg-subtle);border:1px solid var(--border);
+  border-radius:var(--r-sm);cursor:pointer;transition:all .15s;text-align:left;
+  font-size:12px;color:var(--text-s);line-height:1.4;
+}
+.suggestion:hover{border-color:var(--primary);color:var(--text);box-shadow:var(--sh);background:var(--bg)}
+.suggestion strong{display:block;font-size:11px;color:var(--primary);margin-bottom:2px;font-weight:600}
+
+/* ── Input Area ─────────────────────────────────────────── */
+.input-wrap{padding:12px 18px 16px;border-top:1px solid var(--border);background:var(--bg)}
+.input-card{
+  display:flex;align-items:flex-end;gap:8px;
+  background:var(--bg-subtle);border:1.5px solid var(--border);
+  border-radius:var(--r);padding:8px 8px 8px 14px;
+  transition:border-color .2s,box-shadow .2s;
+}
+.input-card:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.12)}
+.input-card textarea{
+  flex:1;resize:none;border:none;background:transparent;
+  font-size:13.5px;font-family:inherit;line-height:1.5;color:var(--text);
+  outline:none;min-height:22px;max-height:140px;
+}
+.input-card textarea::placeholder{color:var(--text-m)}
+.btn-send{
+  width:36px;height:36px;border-radius:9px;border:none;
+  background:var(--primary);color:#fff;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0;transition:all .15s;
+}
+.btn-send:hover{background:var(--primary-dark);box-shadow:var(--sh)}
+.btn-send:disabled{opacity:.35;cursor:not-allowed;box-shadow:none}
+.btn-send svg{width:16px;height:16px;stroke:currentColor}
+.input-hint{font-size:10px;color:var(--text-m);text-align:center;margin-top:6px}
+
+/* ── Settings Panel ─────────────────────────────────────── */
+.settings-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);
+  z-index:200;backdrop-filter:blur(2px);
+}
+.settings-overlay.open{display:block}
+.settings-panel{
+  position:fixed;right:-420px;top:0;bottom:0;width:400px;
+  background:var(--bg);border-left:1px solid var(--border);
+  z-index:201;transition:right .3s cubic-bezier(.4,0,.2,1);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.settings-panel.open{right:0}
+.settings-header{
+  padding:14px 18px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+}
+.settings-header h3{font-size:14px;font-weight:700}
+.settings-close{
+  width:28px;height:28px;border-radius:6px;border:none;
+  background:none;color:var(--text-s);font-size:16px;
+  display:flex;align-items:center;justify-content:center;
+  transition:color .15s,background .15s;
+}
+.settings-close:hover{color:var(--text);background:var(--bg-muted)}
+.settings-body{flex:1;overflow-y:auto;padding:16px 18px;scrollbar-width:thin}
+.setting-group{margin-bottom:18px}
+.setting-group-title{font-size:11px;font-weight:700;color:var(--text-m);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.setting-item{margin-bottom:10px}
+.setting-label{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:500;color:var(--text-s);margin-bottom:4px}
+.setting-desc{font-size:10px;color:var(--text-m);margin-top:2px}
+.setting-input{
+  width:100%;padding:7px 10px;border:1px solid var(--border);
+  border-radius:var(--r-xs);font-size:12px;font-family:inherit;
+  background:var(--bg-subtle);color:var(--text);outline:none;
+  transition:border-color .15s;
+}
+.setting-input:focus{border-color:var(--primary)}
+.setting-select{
+  width:100%;padding:7px 10px;border:1px solid var(--border);
+  border-radius:var(--r-xs);font-size:12px;font-family:inherit;
+  background:var(--bg-subtle);color:var(--text);outline:none;
+  cursor:pointer;
+}
+.slider-wrap{display:flex;align-items:center;gap:8px}
+.slider-wrap input[type=range]{
+  flex:1;-webkit-appearance:none;appearance:none;height:4px;
+  background:var(--border);border-radius:2px;outline:none;
+}
+.slider-wrap input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--primary);cursor:pointer;
+}
+.slider-val{font-size:12px;font-weight:600;color:var(--primary);min-width:24px;text-align:center}
+.toggle{
+  position:relative;width:36px;height:20px;border-radius:10px;
+  background:var(--border);cursor:pointer;transition:background .2s;border:none;
+}
+.toggle.on{background:var(--primary)}
+.toggle::after{
+  content:"";position:absolute;top:2px;left:2px;
+  width:16px;height:16px;border-radius:50%;
+  background:#fff;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.15);
+}
+.toggle.on::after{transform:translateX(16px)}
+.settings-footer{padding:12px 18px;border-top:1px solid var(--border)}
+.btn-reset{
+  width:100%;padding:8px;border:1px solid var(--border);border-radius:var(--r-sm);
+  font-size:12px;font-weight:500;background:none;color:var(--text-s);
+  cursor:pointer;transition:all .15s;
+}
+.btn-reset:hover{border-color:var(--danger);color:var(--danger)}
+
+/* ── Artifact Panel ─────────────────────────────────────── */
+.artifact-panel{
+  width:0;min-width:0;overflow:hidden;flex-shrink:0;
+  background:var(--bg-subtle);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;
+  transition:width .3s cubic-bezier(.4,0,.2,1);
+}
+.artifact-panel.open{width:520px;min-width:320px}
+.artifact-hdr{
+  padding:10px 14px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;background:var(--bg);flex-shrink:0;
+}
+.artifact-hdr-title{flex:1;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.artifact-actions{display:flex;align-items:center;gap:3px}
+.artifact-btn{
+  display:flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:5px;border:none;
+  background:none;color:var(--text-s);font-size:13px;
+  transition:color .15s,background .15s;
+}
+.artifact-btn:hover{color:var(--text);background:var(--bg-muted)}
+.artifact-body{flex:1;overflow-y:auto;padding:18px 20px;scrollbar-width:thin}
+.artifact-body .md h1{font-size:1.3em;border-bottom:1px solid var(--border);padding-bottom:7px}
+.artifact-body .md h2{font-size:1.12em}.artifact-body .md h3{font-size:1em}
+.artifact-body .md p{margin:6px 0;line-height:1.72;font-size:13.5px}
+
+/* ── Toast ──────────────────────────────────────────────── */
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(8px);
+  background:#1e293b;color:#fff;padding:8px 18px;border-radius:24px;
+  font-size:12px;z-index:9999;pointer-events:none;opacity:0;
+  transition:all .3s ease;box-shadow:0 6px 20px rgba(0,0,0,.3);
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ── Overlay ────────────────────────────────────────────── */
+.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:99;backdrop-filter:blur(2px)}
+.sidebar-overlay.show{display:block}
+
+/* ── Scroll ─────────────────────────────────────────────── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px}
+::-webkit-scrollbar-thumb:hover{background:var(--text-m)}
+
+/* ── Responsive ─────────────────────────────────────────── */
+@media(max-width:768px){
+  .sidebar{position:fixed;left:0;top:0;bottom:0;z-index:100;transform:translateX(-100%);width:var(--sidebar-w)!important;min-width:var(--sidebar-w)!important}
+  .sidebar.open{transform:translateX(0)}
+  .sidebar.collapsed{width:var(--sidebar-w)!important;min-width:var(--sidebar-w)!important}
+  .btn-collapse{display:none}
+  .menu-btn{display:flex}
+  .msg-body{max-width:92%}
+  .suggestion-grid{grid-template-columns:1fr}
+  .artifact-panel.open{width:100vw;min-width:100vw}
+  .settings-panel{width:100vw}
+}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
+        </div>
+        <div class="logo-text"><h1>Open Deep Research</h1><p>深度研究助手</p></div>
+      </div>
+      <button class="btn-collapse" id="btnCollapse" title="折叠/展开">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button class="btn-new" id="btnNew">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span class="btn-new-label">新研究</span>
+      </button>
+    </div>
+    <div class="thread-list" id="threadList"></div>
+    <div class="sidebar-footer">
+      <button class="btn-theme" id="themeToggle">
+        <span id="themeIcon">🌙</span><span id="themeLabel">深色</span>
+      </button>
+      <button class="btn-settings" id="btnSettings">
+        <span>⚙️</span><span>设置</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main" id="mainArea">
+    <div class="chat-header">
+      <button class="menu-btn" id="menuBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <span class="chat-title" id="chatTitle">Open Deep Research</span>
+      <div class="header-status" id="headerStatus" style="display:none">
+        <div class="status-dot thinking" id="statusDot"></div>
+        <span id="statusText">研究中…</span>
+      </div>
+      <div class="header-actions">
+        <button class="hdr-btn" id="artifactToggle" title="查看报告" style="display:none">📄</button>
+        <button class="hdr-btn" id="headerSettings" title="设置">⚙️</button>
+      </div>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="empty" id="emptyState">
+        <div class="empty-inner">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
+          </div>
+          <h2>提出你的研究问题</h2>
+          <p>我将自主搜索互联网、分析原始资料，<br>并为你生成一份深度研究报告。</p>
+          <div class="suggestion-grid">
+            <button class="suggestion"><strong>🤖 AI 模型对比</strong>GPT-4.1 与 Claude Sonnet 的综合能力对比</button>
+            <button class="suggestion"><strong>📊 行业分析</strong>2025年全球大模型推理市场竞争格局</button>
+            <button class="suggestion"><strong>🔧 技术原理</strong>LangGraph 多智能体架构工作原理</button>
+            <button class="suggestion"><strong>💡 前沿趋势</strong>RAG 技术最新进展与落地实践</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-wrap">
+      <div class="input-card">
+        <textarea id="input" placeholder="输入研究问题… (Shift+Enter 换行，Enter 发送)" rows="1"></textarea>
+        <button class="btn-send" id="btnSend">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+      <div class="input-hint">由 LangGraph 驱动 · 连接至本地研究服务器 · 信息仅供参考</div>
+    </div>
+  </main>
+
+  <!-- Artifact Panel -->
+  <aside class="artifact-panel" id="artifactPanel">
+    <div class="artifact-hdr">
+      <span>📝</span>
+      <span class="artifact-hdr-title" id="artifactTitle">研究报告</span>
+      <div class="artifact-actions">
+        <button class="artifact-btn" id="artifactCopy" title="复制">📋</button>
+        <button class="artifact-btn" id="artifactDownload" title="下载">⬇️</button>
+        <button class="artifact-btn" id="artifactClose" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="artifact-body" id="artifactBody"></div>
+  </aside>
+</div>
+
+<!-- Settings Panel -->
+<div class="settings-overlay" id="settingsOverlay"></div>
+<div class="settings-panel" id="settingsPanel">
+  <div class="settings-header">
+    <h3>⚙️ 研究配置</h3>
+    <button class="settings-close" id="settingsClose">✕</button>
+  </div>
+  <div class="settings-body">
+    <div class="setting-group">
+      <div class="setting-group-title">搜索配置</div>
+      <div class="setting-item">
+        <div class="setting-label">搜索 API</div>
+        <select class="setting-select" id="cfgSearchApi">
+          <option value="tavily">Tavily</option>
+          <option value="openai">OpenAI 原生搜索</option>
+          <option value="anthropic">Anthropic 原生搜索</option>
+          <option value="none">无</option>
+        </select>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">允许澄清问题</div>
+        <button class="toggle on" id="cfgClarify"></button>
+      </div>
+    </div>
+    <div class="setting-group">
+      <div class="setting-group-title">模型配置</div>
+      <div class="setting-item">
+        <div class="setting-label">研究模型</div>
+        <input class="setting-input" id="cfgResearchModel" value="deepseek:deepseek-chat" />
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">压缩模型</div>
+        <input class="setting-input" id="cfgCompressionModel" value="deepseek:deepseek-chat" />
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">报告模型</div>
+        <input class="setting-input" id="cfgReportModel" value="deepseek:deepseek-chat" />
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">摘要模型</div>
+        <input class="setting-input" id="cfgSummarizationModel" value="deepseek:deepseek-chat" />
+      </div>
+    </div>
+    <div class="setting-group">
+      <div class="setting-group-title">研究参数</div>
+      <div class="setting-item">
+        <div class="setting-label">最大并发研究单元 <span class="slider-val" id="cfgConcurrentVal">5</span></div>
+        <div class="slider-wrap">
+          <input type="range" id="cfgConcurrent" min="1" max="20" value="5" />
+        </div>
+        <div class="setting-desc">同时运行的子研究数量</div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">最大研究迭代 <span class="slider-val" id="cfgIterationsVal">6</span></div>
+        <div class="slider-wrap">
+          <input type="range" id="cfgIterations" min="1" max="10" value="6" />
+        </div>
+        <div class="setting-desc">研究主管的最大反思与调度轮数</div>
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">最大工具调用次数 <span class="slider-val" id="cfgToolCallsVal">10</span></div>
+        <div class="slider-wrap">
+          <input type="range" id="cfgToolCalls" min="1" max="30" value="10" />
+        </div>
+        <div class="setting-desc">单个研究者的最大工具调用迭代</div>
+      </div>
+    </div>
+    <div class="setting-group">
+      <div class="setting-group-title">服务器</div>
+      <div class="setting-item">
+        <div class="setting-label">API 地址</div>
+        <input class="setting-input" id="cfgApiBase" value="/api" />
+      </div>
+    </div>
+  </div>
+  <div class="settings-footer">
+    <button class="btn-reset" id="btnResetSettings">恢复默认设置</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────
+const S = {
+  threads: [],          // [{id, title, time}]
+  currentThreadId: null,
+  messages: {},         // threadId -> [{role, content, type}]
+  streaming: false,
+  abortCtrl: null,
+  currentSteps: {},     // threadId -> [{name, status}]
+  finalReport: {},      // threadId -> markdown string
+};
+
+// ── Config ───────────────────────────────────────────────────
+const CONFIG_VERSION = 2;
+const DEFAULTS = {
+  config_version: CONFIG_VERSION,
+  search_api: 'tavily',
+  allow_clarification: true,
+  research_model: 'deepseek:deepseek-chat',
+  compression_model: 'deepseek:deepseek-chat',
+  final_report_model: 'deepseek:deepseek-chat',
+  summarization_model: 'deepseek:deepseek-chat',
+  max_concurrent_research_units: 5,
+  max_researcher_iterations: 6,
+  max_react_tool_calls: 10,
+  api_base: '/api',
+};
+
+function loadConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('odr_config') || '{}');
+    // One-time migration: old builds persisted their OpenAI defaults in the
+    // browser, which otherwise override the new DeepSeek defaults forever.
+    if (!saved.config_version) {
+      const legacyModels = new Set(['openai:gpt-4.1', 'openai:gpt-4.1-mini']);
+      for (const key of ['research_model', 'compression_model', 'final_report_model', 'summarization_model']) {
+        if (!saved[key] || legacyModels.has(saved[key])) saved[key] = DEFAULTS[key];
+      }
+    }
+    return { ...DEFAULTS, ...saved, config_version: CONFIG_VERSION };
+  } catch { return { ...DEFAULTS }; }
+}
+
+function saveConfig(cfg) {
+  localStorage.setItem('odr_config', JSON.stringify({ ...cfg, config_version: CONFIG_VERSION }));
+}
+
+function getApiBase() {
+  return document.getElementById('cfgApiBase').value || DEFAULTS.api_base;
+}
+
+// ── DOM Refs ─────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const sidebar = $('sidebar');
+const sidebarOverlay = $('sidebarOverlay');
+const threadList = $('threadList');
+const messagesEl = $('messages');
+const emptyState = $('emptyState');
+const inputEl = $('input');
+const btnSend = $('btnSend');
+const chatTitle = $('chatTitle');
+const headerStatus = $('headerStatus');
+const statusText = $('statusText');
+const artifactPanel = $('artifactPanel');
+const artifactBody = $('artifactBody');
+const artifactTitle = $('artifactTitle');
+const settingsPanel = $('settingsPanel');
+const settingsOverlay = $('settingsOverlay');
+const toastEl = $('toast');
+
+// ── Marked Config ────────────────────────────────────────────
+marked.setOptions({ breaks: true, gfm: true });
+
+// ── Theme ────────────────────────────────────────────────────
+function initTheme() {
+  const t = localStorage.getItem('odr_theme') || 'light';
+  document.documentElement.setAttribute('data-theme', t);
+  updateThemeBtn(t);
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('odr_theme', next);
+  updateThemeBtn(next);
+}
+
+function updateThemeBtn(t) {
+  $('themeIcon').textContent = t === 'dark' ? '☀️' : '🌙';
+  $('themeLabel').textContent = t === 'dark' ? '浅色' : '深色';
+}
+
+// ── Toast ────────────────────────────────────────────────────
+let toastTimer;
+function showToast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2500);
+}
+
+// ── Sidebar ──────────────────────────────────────────────────
+function toggleSidebar() {
+  sidebar.classList.toggle('collapsed');
+  saveThreads();
+}
+
+function openSidebarMobile() {
+  sidebar.classList.add('open');
+  sidebarOverlay.classList.add('show');
+}
+
+function closeSidebarMobile() {
+  sidebar.classList.remove('open');
+  sidebarOverlay.classList.remove('show');
+}
+
+// ── Threads ──────────────────────────────────────────────────
+function loadThreads() {
+  try {
+    S.threads = JSON.parse(localStorage.getItem('odr_threads') || '[]');
+  } catch { S.threads = []; }
+  try {
+    const msgs = JSON.parse(localStorage.getItem('odr_messages') || '{}');
+    Object.keys(msgs).forEach(k => S.messages[k] = msgs[k].map(m => ({...m})));
+  } catch {}
+  try {
+    S.finalReport = JSON.parse(localStorage.getItem('odr_reports') || '{}');
+  } catch {}
+  try {
+    const saved = localStorage.getItem('odr_current_thread');
+    if (saved && S.threads.find(t => t.id === saved)) {
+      S.currentThreadId = saved;
+    }
+  } catch {}
+}
+
+function saveThreads() {
+  localStorage.setItem('odr_threads', JSON.stringify(S.threads));
+  localStorage.setItem('odr_messages', JSON.stringify(S.messages));
+  localStorage.setItem('odr_reports', JSON.stringify(S.finalReport));
+  if (S.currentThreadId) localStorage.setItem('odr_current_thread', S.currentThreadId);
+}
+
+function addThread(id, title) {
+  const thread = { id, title: title || '新研究', time: new Date().toLocaleString('zh-CN') };
+  S.threads.unshift(thread);
+  S.messages[id] = [];
+  S.finalReport[id] = '';
+  S.currentThreadId = id;
+  saveThreads();
+  renderThreadList();
+  switchThread(id);
+}
+
+function switchThread(id) {
+  S.currentThreadId = id;
+  localStorage.setItem('odr_current_thread', id);
+  renderThreadList();
+  renderMessages();
+  updateChatTitle();
+  // Show/hide artifact toggle
+  $('artifactToggle').style.display = S.finalReport[id] ? '' : 'none';
+}
+
+function deleteThread(id) {
+  S.threads = S.threads.filter(t => t.id !== id);
+  delete S.messages[id];
+  delete S.finalReport[id];
+  if (S.currentThreadId === id) {
+    S.currentThreadId = S.threads[0]?.id || null;
+  }
+  saveThreads();
+  renderThreadList();
+  renderMessages();
+  updateChatTitle();
+}
+
+function renderThreadList() {
+  if (S.threads.length === 0) {
+    threadList.innerHTML = '<div class="thread-empty">暂无研究记录</div>';
+    return;
+  }
+  threadList.innerHTML = S.threads.map(t => `
+    <div class="thread-item ${t.id === S.currentThreadId ? 'active' : ''}" data-id="${t.id}">
+      <div class="thread-item-icon">${t.title[0]}</div>
+      <div class="thread-title-text">${escHtml(t.title)}</div>
+      <div class="thread-time">${t.time}</div>
+    </div>
+  `).join('');
+  threadList.querySelectorAll('.thread-item').forEach(el => {
+    el.addEventListener('click', () => switchThread(el.dataset.id));
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      if (confirm('删除此研究记录？')) deleteThread(el.dataset.id);
+    });
+  });
+}
+
+function updateChatTitle() {
+  const t = S.threads.find(t => t.id === S.currentThreadId);
+  chatTitle.textContent = t ? t.title : 'Open Deep Research';
+}
+
+// ── Messages ─────────────────────────────────────────────────
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderMd(text) {
+  return marked.parse(text || '');
+}
+
+function addMessage(threadId, role, content, type = 'text') {
+  if (!S.messages[threadId]) S.messages[threadId] = [];
+  S.messages[threadId].push({ role, content, type });
+  if (threadId === S.currentThreadId) renderMessages();
+  saveThreads();
+}
+
+function updateLastAssistant(threadId, content) {
+  const msgs = S.messages[threadId];
+  if (!msgs) return;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant') {
+      msgs[i].content = content;
+      break;
+    }
+  }
+}
+
+function renderMessages() {
+  const tid = S.currentThreadId;
+  const msgs = S.messages[tid] || [];
+
+  if (msgs.length === 0) {
+    emptyState.style.display = '';
+    messagesEl.querySelectorAll('.msg-row, .step-indicator').forEach(e => e.remove());
+    artifactPanel.classList.remove('open');
+    $('artifactToggle').style.display = 'none';
+    return;
+  }
+
+  emptyState.style.display = 'none';
+
+  // Build HTML
+  let html = '';
+
+  // Steps indicator
+  const steps = S.currentSteps[tid] || [];
+  if (steps.length > 0) {
+    html += `<div class="step-indicator">${steps.map(s => {
+      const cls = ['done', 'active', 'failed'].includes(s.status) ? s.status : '';
+      return `<span class="step-chip ${cls}"><span class="step-dot"></span>${escHtml(s.name)}</span>`;
+    }).join('')}</div>`;
+  }
+
+  for (const m of msgs) {
+    if (m.role === 'user') {
+      html += `<div class="msg-row user"><div class="msg-avatar">你</div><div class="msg-body"><div class="msg-bubble">${escHtml(m.content)}</div></div></div>`;
+    } else if (m.role === 'assistant') {
+      const mdClass = 'md';
+      const isStreaming = m === msgs[msgs.length - 1] && S.streaming;
+      const cursorClass = isStreaming ? ' cursor' : '';
+      html += `<div class="msg-row assistant${isStreaming ? ' streaming' : ''}"><div class="msg-avatar">🔬</div><div class="msg-body"><div class="msg-bubble ${mdClass}${cursorClass}">${renderMd(m.content)}</div></div></div>`;
+    } else if (m.type === 'step') {
+      html += `<div class="msg-row assistant"><div class="msg-avatar">⚙️</div><div class="msg-body"><div class="msg-bubble" style="font-size:12px;color:var(--text-s)">${escHtml(m.content)}</div></div></div>`;
+    }
+  }
+
+  // Keep only message nodes, replace content
+  messagesEl.querySelectorAll('.msg-row, .step-indicator').forEach(e => e.remove());
+  messagesEl.insertAdjacentHTML('beforeend', html);
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+}
+
+// ── Steps ────────────────────────────────────────────────────
+const STEP_MAP = {
+  'clarify_with_user': { name: '🤔 分析问题', idx: 0 },
+  'write_research_brief': { name: '📝 撰写简报', idx: 1 },
+  'research_supervisor': { name: '🔬 深度研究', idx: 2 },
+  'final_report_generation': { name: '📊 生成报告', idx: 3 },
+};
+
+function setStep(threadId, nodeName, status) {
+  if (!S.currentSteps[threadId]) S.currentSteps[threadId] = [];
+  const steps = S.currentSteps[threadId];
+  const info = STEP_MAP[nodeName];
+  if (!info) return;
+
+  // Mark all previous as done
+  steps.forEach(s => { if (s.idx < info.idx) s.status = 'done'; });
+
+  // Update or add current
+  const existing = steps.find(s => s.name === info.name);
+  if (existing) {
+    existing.status = status;
+  } else {
+    steps.push({ name: info.name, idx: info.idx, status });
+  }
+
+  steps.sort((a, b) => a.idx - b.idx);
+  if (threadId === S.currentThreadId) renderMessages();
+}
+
+// ── SSE Parser ───────────────────────────────────────────────
+/**
+ * Parse a LangGraph Server SSE stream.
+ *
+ * LangGraph /runs/stream returns SSE events like:
+ *   event: values
+ *   data: {"messages":[...],"final_report":"..."}
+ *
+ * or with multi-stream_mode, the data is a JSON array [mode, payload]:
+ *   event: messages/partial
+ *   data: [["messages/partial", [{...}]]]
+ *
+ * We handle both formats.
+ */
+function parseSSEChunk(chunk) {
+  const events = [];
+  const blocks = chunk.split('\n\n');
+  for (const block of blocks) {
+    if (!block.trim()) continue;
+    let eventType = '';
+    let dataStr = '';
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) {
+        eventType = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataStr = line.slice(5).trim();
+      }
+    }
+    if (dataStr) {
+      events.push({ event: eventType, data: dataStr });
+    }
+  }
+  return events;
+}
+
+/**
+ * Process a single parsed SSE event and return structured result.
+ */
+function processSSEEvent(eventType, dataStr) {
+  try {
+    const raw = JSON.parse(dataStr);
+
+    // Format 1: Array [stream_mode, payload] (used when multiple stream_mode)
+    if (Array.isArray(raw) && raw.length === 2 && typeof raw[0] === 'string') {
+      return { mode: raw[0], payload: raw[1] };
+    }
+
+    // Format 2: Direct payload, mode from event type
+    return { mode: eventType, payload: raw };
+  } catch {
+    return null;
+  }
+}
+
+// ── API Client ───────────────────────────────────────────────
+async function apiFetch(path, opts = {}) {
+  const base = getApiBase();
+  const res = await fetch(`${base}${path}`, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API error ${res.status}: ${text}`);
+  }
+  return res;
+}
+
+async function createThread() {
+  const res = await apiFetch('/threads', { method: 'POST', body: JSON.stringify({}) });
+  return res.json();
+}
+
+function buildConfig() {
+  return {
+    search_api: $('cfgSearchApi').value,
+    allow_clarification: $('cfgClarify').classList.contains('on'),
+    research_model: $('cfgResearchModel').value,
+    compression_model: $('cfgCompressionModel').value,
+    final_report_model: $('cfgReportModel').value,
+    summarization_model: $('cfgSummarizationModel').value,
+    max_concurrent_research_units: parseInt($('cfgConcurrent').value),
+    max_researcher_iterations: parseInt($('cfgIterations').value),
+    max_react_tool_calls: parseInt($('cfgToolCalls').value),
+    api_base: $('cfgApiBase').value || DEFAULTS.api_base,
+  };
+}
+
+function updateUI_streaming(isStreaming) {
+  btnSend.disabled = isStreaming;
+  inputEl.disabled = isStreaming;
+  headerStatus.style.display = isStreaming ? '' : 'none';
+  statusText.textContent = isStreaming ? '研究中…' : '';
+  if (isStreaming) {
+    $('statusDot').className = 'status-dot thinking';
+  }
+}
+
+/**
+ * Core streaming logic: POST to /threads/{id}/runs/stream and process SSE events.
+ * Returns the full accumulated AI message content.
+ */
+async function doStreamRun(threadId, userMessage) {
+  const base = getApiBase();
+  S.streaming = true;
+  S.abortCtrl = new AbortController();
+  updateUI_streaming(true);
+
+  // Add user message to UI
+  addMessage(threadId, 'user', userMessage);
+
+  // Add placeholder assistant message
+  addMessage(threadId, 'assistant', '');
+  const assistantIdx = S.messages[threadId].length - 1;
+  let fullContent = '';
+  let runFailed = false;
+  let sawEnd = false;
+
+  try {
+    const res = await fetch(`${base}/threads/${threadId}/runs/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: S.abortCtrl.signal,
+      body: JSON.stringify({
+        assistant_id: 'Deep Researcher',
+        input: { messages: [{ role: 'human', content: userMessage }] },
+        config: { configurable: buildConfig() },
+        stream_mode: ['messages', 'values', 'updates'],
+      }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Stream error ${res.status}: ${text}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (!runFailed && !sawEnd) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split on double newline (SSE event boundary)
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const events = parseSSEChunk(part);
+        for (const { event: evtType, data: dataStr } of events) {
+          const parsed = processSSEEvent(evtType, dataStr);
+          if (!parsed) continue;
+
+          const { mode, payload } = parsed;
+
+          // ── messages mode: token-by-token streaming ──
+          if (mode === 'messages/partial' && Array.isArray(payload)) {
+            for (const chunk of payload) {
+              // chunk can be a message dict with content field
+              if (chunk && chunk.content && typeof chunk.content === 'string') {
+                // Only append if it's from an AI/assistant message
+                if (chunk.type === 'AIMessageChunk' || chunk.role === 'assistant' ||
+                    chunk.type === 'ai' || !chunk.type) {
+                  fullContent += chunk.content;
+                  S.messages[threadId][assistantIdx].content = fullContent;
+                  renderMessages();
+                }
+              }
+            }
+          }
+
+          // ── messages/complete: a complete message ──
+          if (mode === 'messages/complete' && Array.isArray(payload)) {
+            for (const msg of payload) {
+              if (msg && msg.content && typeof msg.content === 'string') {
+                if (msg.type === 'ai' || msg.role === 'assistant') {
+                  // Use the complete message content (may be more reliable than partials)
+                  if (msg.content.length > fullContent.length) {
+                    fullContent = msg.content;
+                    S.messages[threadId][assistantIdx].content = fullContent;
+                    renderMessages();
+                  }
+                }
+              }
+            }
+          }
+
+          // ── values mode: full state snapshots ──
+          if (mode === 'values' && payload) {
+            // Detect final report
+            if (payload.final_report) {
+              S.finalReport[threadId] = payload.final_report;
+              saveThreads();
+              showArtifact(payload.final_report);
+            }
+            // If messages exist, extract last AI message as fallback
+            if (payload.messages && payload.messages.length > 0) {
+              for (let i = payload.messages.length - 1; i >= 0; i--) {
+                const m = payload.messages[i];
+                if ((m.type === 'ai' || m.role === 'assistant') && m.content) {
+                  if (typeof m.content === 'string' && m.content.length > fullContent.length) {
+                    fullContent = m.content;
+                    S.messages[threadId][assistantIdx].content = fullContent;
+                    renderMessages();
+                  }
+                  break;
+                }
+              }
+            }
+          }
+
+          // ── updates mode: node-level progress ──
+          if (mode === 'updates' && payload) {
+            // payload is { nodeName: stateUpdate } — keys are node names
+            const nodeNames = Object.keys(payload);
+            for (const nodeName of nodeNames) {
+              const stepStatus = payload[nodeName]?.status || 'active';
+              // Map node names to steps
+              if (STEP_MAP[nodeName]) {
+                setStep(threadId, nodeName, stepStatus);
+              }
+              // Also handle subgraph node names (e.g. "research_supervisor:supervisor")
+              for (const [key, stepInfo] of Object.entries(STEP_MAP)) {
+                if (nodeName.includes(key) || nodeName === key) {
+                  setStep(threadId, key, stepStatus);
+                }
+              }
+            }
+          }
+
+          // ── end event ──
+          if (mode === 'end') {
+            sawEnd = true;
+          }
+
+          // ── error event ──
+          if (mode === 'error') {
+            const errMsg = typeof payload === 'string' ? payload : JSON.stringify(payload);
+            runFailed = true;
+            const steps = S.currentSteps[threadId] || [];
+            const activeStep = [...steps].reverse().find(step => step.status === 'active');
+            if (activeStep) activeStep.status = 'failed';
+            fullContent += `${fullContent ? '\n\n' : ''}⚠️ 研究失败：${errMsg}`;
+            S.messages[threadId][assistantIdx].content = fullContent;
+            renderMessages();
+          }
+        }
+      }
+    }
+
+    if (!runFailed && !sawEnd) {
+      throw new Error('研究流意外中断，服务端未发送完成事件');
+    }
+
+    // Only a real end event means the run completed successfully.
+    if (sawEnd && S.currentSteps[threadId]) {
+      S.currentSteps[threadId].forEach(s => s.status = 'done');
+      renderMessages();
+    }
+
+    // If no content was streamed, try to get final state as fallback
+    if (!runFailed && !fullContent) {
+      try {
+        const stateRes = await apiFetch(`/threads/${threadId}/state`);
+        const state = await stateRes.json();
+        const vals = state.values || {};
+
+        if (vals.messages && vals.messages.length > 0) {
+          for (let i = vals.messages.length - 1; i >= 0; i--) {
+            const m = vals.messages[i];
+            if ((m.type === 'ai' || m.role === 'assistant') && m.content) {
+              fullContent = m.content;
+              break;
+            }
+          }
+        }
+
+        if (vals.final_report) {
+          S.finalReport[threadId] = vals.final_report;
+          saveThreads();
+          showArtifact(vals.final_report);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch final state:', e);
+      }
+    }
+
+    // Final update
+    S.messages[threadId][assistantIdx].content = fullContent || '（无响应）';
+    renderMessages();
+    saveThreads();
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      showToast('已取消研究');
+    } else {
+      console.error('Stream error:', err);
+      const steps = S.currentSteps[threadId] || [];
+      const activeStep = [...steps].reverse().find(step => step.status === 'active');
+      if (activeStep) activeStep.status = 'failed';
+      S.messages[threadId][assistantIdx].content = `⚠️ 连接失败: ${err.message}\n\n请确保 LangGraph Server 已启动 (${getApiBase()})`;
+      renderMessages();
+      showToast('连接失败，请检查服务器');
+    }
+  } finally {
+    S.streaming = false;
+    S.abortCtrl = null;
+    updateUI_streaming(false);
+    // Remove the streaming cursor/class after success, failure, or cancellation.
+    if (threadId === S.currentThreadId) renderMessages();
+  }
+}
+
+async function streamRun(threadId, userMessage) {
+  return doStreamRun(threadId, userMessage);
+}
+
+async function continueRun(threadId, userMessage) {
+  return doStreamRun(threadId, userMessage);
+}
+
+// ── Artifact Panel ───────────────────────────────────────────
+function showArtifact(markdown) {
+  artifactBody.innerHTML = `<div class="md">${renderMd(markdown)}</div>`;
+  artifactPanel.classList.add('open');
+  $('artifactToggle').style.display = '';
+}
+
+function closeArtifact() {
+  artifactPanel.classList.remove('open');
+}
+
+// ── Settings ─────────────────────────────────────────────────
+function openSettings() {
+  settingsPanel.classList.add('open');
+  settingsOverlay.classList.add('open');
+}
+
+function closeSettings() {
+  settingsPanel.classList.remove('open');
+  settingsOverlay.classList.remove('open');
+  // Save config
+  saveConfig(buildConfig());
+}
+
+function applyConfigToUI(cfg) {
+  $('cfgSearchApi').value = cfg.search_api || DEFAULTS.search_api;
+  $('cfgClarify').className = 'toggle' + (cfg.allow_clarification !== false ? ' on' : '');
+  $('cfgResearchModel').value = cfg.research_model || DEFAULTS.research_model;
+  $('cfgCompressionModel').value = cfg.compression_model || DEFAULTS.compression_model;
+  $('cfgReportModel').value = cfg.final_report_model || DEFAULTS.final_report_model;
+  $('cfgSummarizationModel').value = cfg.summarization_model || DEFAULTS.summarization_model;
+  $('cfgConcurrent').value = cfg.max_concurrent_research_units || DEFAULTS.max_concurrent_research_units;
+  $('cfgConcurrentVal').textContent = $('cfgConcurrent').value;
+  $('cfgIterations').value = cfg.max_researcher_iterations || DEFAULTS.max_researcher_iterations;
+  $('cfgIterationsVal').textContent = $('cfgIterations').value;
+  $('cfgToolCalls').value = cfg.max_react_tool_calls || DEFAULTS.max_react_tool_calls;
+  $('cfgToolCallsVal').textContent = $('cfgToolCalls').value;
+  $('cfgApiBase').value = cfg.api_base || DEFAULTS.api_base;
+}
+
+// ── Send Message ─────────────────────────────────────────────
+async function sendMessage(text) {
+  text = text.trim();
+  if (!text || S.streaming) return;
+
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+
+  // If no current thread, create one
+  if (!S.currentThreadId) {
+    try {
+      const thread = await createThread();
+      const title = text.slice(0, 40) + (text.length > 40 ? '…' : '');
+      addThread(thread.thread_id, title);
+      await streamRun(thread.thread_id, text);
+    } catch (err) {
+      showToast('创建会话失败: ' + err.message);
+    }
+  } else {
+    // Continue in existing thread
+    await continueRun(S.currentThreadId, text);
+  }
+}
+
+// ── New Research ─────────────────────────────────────────────
+async function newResearch() {
+  if (S.streaming) return;
+  S.currentThreadId = null;
+  S.currentSteps = {};
+  messagesEl.querySelectorAll('.msg-row, .step-indicator').forEach(e => e.remove());
+  emptyState.style.display = '';
+  chatTitle.textContent = 'Open Deep Research';
+  artifactPanel.classList.remove('open');
+  $('artifactToggle').style.display = 'none';
+  renderThreadList();
+  inputEl.focus();
+}
+
+// ── Auto-resize textarea ─────────────────────────────────────
+function autoResize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+}
+
+// ── Event Bindings ───────────────────────────────────────────
+function init() {
+  initTheme();
+  loadThreads();
+  const cfg = loadConfig();
+  applyConfigToUI(cfg);
+  renderThreadList();
+
+  // If current thread, render its messages
+  if (S.currentThreadId) {
+    renderMessages();
+    updateChatTitle();
+    if (S.finalReport[S.currentThreadId]) {
+      $('artifactToggle').style.display = '';
+    }
+  }
+
+  // Theme
+  $('themeToggle').addEventListener('click', toggleTheme);
+
+  // Sidebar
+  $('btnCollapse').addEventListener('click', toggleSidebar);
+  $('menuBtn').addEventListener('click', openSidebarMobile);
+  sidebarOverlay.addEventListener('click', closeSidebarMobile);
+
+  // New research
+  $('btnNew').addEventListener('click', newResearch);
+
+  // Send
+  btnSend.addEventListener('click', () => sendMessage(inputEl.value));
+  inputEl.addEventListener('input', autoResize);
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage(inputEl.value);
+    }
+  });
+
+  // Suggestions
+  document.querySelectorAll('.suggestion').forEach(btn => {
+    btn.addEventListener('click', () => sendMessage(btn.textContent.replace(/^[^\s]+\s/, '')));
+  });
+
+  // Artifact panel
+  $('artifactToggle').addEventListener('click', () => {
+    if (artifactPanel.classList.contains('open')) {
+      closeArtifact();
+    } else if (S.finalReport[S.currentThreadId]) {
+      showArtifact(S.finalReport[S.currentThreadId]);
+    }
+  });
+  $('artifactClose').addEventListener('click', closeArtifact);
+  $('artifactCopy').addEventListener('click', () => {
+    const text = S.finalReport[S.currentThreadId] || '';
+    navigator.clipboard.writeText(text).then(() => showToast('已复制'));
+  });
+  $('artifactDownload').addEventListener('click', () => {
+    const text = S.finalReport[S.currentThreadId] || '';
+    const blob = new Blob([text], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `research-report-${new Date().toISOString().slice(0,10)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('已下载');
+  });
+
+  // Settings
+  $('btnSettings').addEventListener('click', openSettings);
+  $('headerSettings').addEventListener('click', openSettings);
+  $('settingsClose').addEventListener('click', closeSettings);
+  settingsOverlay.addEventListener('click', closeSettings);
+
+  // Toggle switches
+  $('cfgClarify').addEventListener('click', function() {
+    this.classList.toggle('on');
+  });
+
+  // Sliders
+  $('cfgConcurrent').addEventListener('input', function() {
+    $('cfgConcurrentVal').textContent = this.value;
+  });
+  $('cfgIterations').addEventListener('input', function() {
+    $('cfgIterationsVal').textContent = this.value;
+  });
+  $('cfgToolCalls').addEventListener('input', function() {
+    $('cfgToolCallsVal').textContent = this.value;
+  });
+
+  // Reset settings
+  $('btnResetSettings').addEventListener('click', () => {
+    applyConfigToUI(DEFAULTS);
+    saveConfig(DEFAULTS);
+    showToast('已恢复默认设置');
+  });
+}
+
+init();
+</script>
+</body>
+</html>

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, List, Optional
 
 from langchain_core.runnables import RunnableConfig
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SearchAPI(Enum):
@@ -21,17 +21,14 @@ class MCPConfig(BaseModel):
     
     url: Optional[str] = Field(
         default=None,
-        optional=True,
     )
     """The URL of the MCP server"""
     tools: Optional[List[str]] = Field(
         default=None,
-        optional=True,
     )
     """The tools to make available to the LLM"""
     auth_required: Optional[bool] = Field(
         default=False,
-        optional=True,
     )
     """Whether the MCP server requires authentication"""
 
@@ -41,7 +38,7 @@ class Configuration(BaseModel):
     # General Configuration
     max_structured_output_retries: int = Field(
         default=3,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 3,
@@ -53,7 +50,7 @@ class Configuration(BaseModel):
     )
     allow_clarification: bool = Field(
         default=True,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "boolean",
                 "default": True,
@@ -63,7 +60,7 @@ class Configuration(BaseModel):
     )
     max_concurrent_research_units: int = Field(
         default=5,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 5,
@@ -77,7 +74,7 @@ class Configuration(BaseModel):
     # Research Configuration
     search_api: SearchAPI = Field(
         default=SearchAPI.TAVILY,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "select",
                 "default": "tavily",
@@ -93,7 +90,7 @@ class Configuration(BaseModel):
     )
     max_researcher_iterations: int = Field(
         default=6,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 6,
@@ -106,7 +103,7 @@ class Configuration(BaseModel):
     )
     max_react_tool_calls: int = Field(
         default=10,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "slider",
                 "default": 10,
@@ -119,18 +116,18 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-mini",
-        metadata={
+        default="deepseek:deepseek-chat",
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-mini",
+                "default": "deepseek:deepseek-chat",
                 "description": "Model for summarizing research results from Tavily search results"
             }
         }
     )
     summarization_model_max_tokens: int = Field(
         default=8192,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 8192,
@@ -140,7 +137,7 @@ class Configuration(BaseModel):
     )
     max_content_length: int = Field(
         default=50000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 50000,
@@ -151,18 +148,18 @@ class Configuration(BaseModel):
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
-        metadata={
+        default="deepseek:deepseek-chat",
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "deepseek:deepseek-chat",
                 "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
             }
         }
     )
     research_model_max_tokens: int = Field(
         default=10000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 10000,
@@ -171,18 +168,18 @@ class Configuration(BaseModel):
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1",
-        metadata={
+        default="deepseek:deepseek-chat",
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "deepseek:deepseek-chat",
                 "description": "Model for compressing research findings from sub-agents. NOTE: Make sure your Compression Model supports the selected search API."
             }
         }
     )
     compression_model_max_tokens: int = Field(
         default=8192,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 8192,
@@ -191,18 +188,18 @@ class Configuration(BaseModel):
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
-        metadata={
+        default="deepseek:deepseek-chat",
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "deepseek:deepseek-chat",
                 "description": "Model for writing the final report from all research findings"
             }
         }
     )
     final_report_model_max_tokens: int = Field(
         default=10000,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "number",
                 "default": 10000,
@@ -213,8 +210,7 @@ class Configuration(BaseModel):
     # MCP server configuration
     mcp_config: Optional[MCPConfig] = Field(
         default=None,
-        optional=True,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "mcp",
                 "description": "MCP server configuration"
@@ -223,8 +219,7 @@ class Configuration(BaseModel):
     )
     mcp_prompt: Optional[str] = Field(
         default=None,
-        optional=True,
-        metadata={
+        json_schema_extra={
             "x_oap_ui_config": {
                 "type": "text",
                 "description": "Any additional instructions to pass along to the Agent regarding the MCP tools that are available to it."
@@ -246,7 +241,4 @@ class Configuration(BaseModel):
         }
         return cls(**{k: v for k, v in values.items() if v is not None})
 
-    class Config:
-        """Pydantic configuration."""
-        
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
