@@ -10,19 +10,13 @@
     research: ["检索与分析", "并行搜索并交叉验证"],
     report: ["生成报告", "整理结论与引用"],
   };
-  const PRESETS = {
-    quick: { max_search_calls: 4, max_concurrent_research_units: 2, max_researcher_iterations: 3, max_react_tool_calls: 6 },
-    standard: { max_search_calls: 8, max_concurrent_research_units: 5, max_researcher_iterations: 6, max_react_tool_calls: 10 },
-    deep: { max_search_calls: 16, max_concurrent_research_units: 7, max_researcher_iterations: 9, max_react_tool_calls: 16 },
-  };
   const DEFAULT_CONFIG = {
-    depth: "standard",
     search_apis: ["tavily"],
-    max_search_calls: 8,
+    max_search_calls: 6,
     max_concurrent_research_units: 5,
     max_researcher_iterations: 6,
     max_react_tool_calls: 10,
-    allow_clarification: true,
+    allow_clarification: false,
     model_provider: "deepseek",
     model_name: "deepseek:deepseek-chat",
     same_model: true,
@@ -31,6 +25,16 @@
     compression_model: "deepseek:deepseek-chat",
     final_report_model: "deepseek:deepseek-chat",
     ollama_base_url: "http://host.docker.internal:11434",
+    knowledge_bases: [],
+    mcp_enabled: false,
+    mcp_url: "",
+    mcp_tools: [],
+    mcp_auth_required: false,
+    mcp_prompt: "",
+    generate_report: true,
+    report_language: "zh-CN",
+    report_length: "standard",
+    require_citations: true,
     api_base: "/api",
     theme: "light",
   };
@@ -43,6 +47,7 @@
     pageSubtitle: $("pageSubtitle"), runBadge: $("runBadge"), showReport: $("showReport"),
     artifactPanel: $("artifactPanel"), artifactContent: $("artifactContent"),
     settings: $("settingsDrawer"), drawerOverlay: $("drawerOverlay"), toast: $("toast"),
+    taskPanel: $("taskPanel"), taskPanelBody: $("taskPanelBody"), elapsedTime: $("elapsedTime"),
   };
 
   let config = loadJson(CONFIG_KEY, DEFAULT_CONFIG);
@@ -56,6 +61,7 @@
     reports: persisted.reports || {},
     streaming: false,
     controller: null,
+    elapsedTimer: null,
   };
 
   function loadJson(key, fallback) {
@@ -119,11 +125,11 @@
   async function createThread(query) {
     const response = await fetch(api("/threads"), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: titleFromQuery(query) || "新研究" }),
+      body: JSON.stringify({ query, configurable: buildRuntimeConfig() }),
     });
     if (!response.ok) throw new Error(await response.text() || "创建研究失败");
     const data = await response.json();
-    const thread = { id: data.thread_id || data.id, title: titleFromQuery(query), createdAt: Date.now(), updatedAt: Date.now() };
+    const thread = { id: data.thread_id || data.id, title: data.title || titleFromQuery(query), createdAt: Date.now(), updatedAt: Date.now() };
     state.threads.unshift(thread);
     state.currentThreadId = thread.id;
     state.messages[thread.id] = [];
@@ -140,21 +146,30 @@
       search_api: selected[0], search_apis: selected,
       max_search_calls: Number(config.max_search_calls),
       max_concurrent_research_units: Number(config.max_concurrent_research_units),
-      max_researcher_iterations: Number(config.max_researcher_iterations),
-      max_react_tool_calls: Number(config.max_react_tool_calls),
-      allow_clarification: Boolean(config.allow_clarification),
+      max_researcher_iterations: Number(config.max_search_calls),
+      max_react_tool_calls: Math.max(4, Number(config.max_search_calls) * 2),
+      allow_clarification: false,
       research_model: same ? model : config.research_model,
       summarization_model: same ? model : config.summarization_model,
       compression_model: same ? model : config.compression_model,
       final_report_model: same ? model : config.final_report_model,
       ollama_base_url: config.ollama_base_url,
+      knowledge_base_ids: config.knowledge_bases.map((item) => item.id),
+      mcp_config: config.mcp_enabled && config.mcp_url ? {
+        url: config.mcp_url, tools: config.mcp_tools, auth_required: config.mcp_auth_required,
+      } : null,
+      mcp_prompt: config.mcp_prompt,
+      generate_report: config.generate_report,
+      report_language: config.report_language,
+      report_length: config.report_length,
+      require_citations: config.require_citations,
     };
   }
 
   function newRun() {
     return {
       status: "running", title: "正在理解研究问题", subtitle: "AI 正在判断问题是否需要澄清",
-      startedAt: Date.now(), searchCount: 0, budget: Number(config.max_search_calls),
+      startedAt: Date.now(), endedAt: null, searchCount: 0, budget: Number(config.max_search_calls),
       phases: { scope: "running", plan: "pending", research: "pending", report: "pending" },
       activities: [], pending: null,
     };
@@ -168,9 +183,10 @@
     try {
       if (!state.currentThreadId || currentMessages().length) await createThread(query);
       const thread = state.threads.find((item) => item.id === state.currentThreadId);
-      if (thread) { thread.title = titleFromQuery(query); thread.updatedAt = Date.now(); }
+      if (thread) thread.updatedAt = Date.now();
       addMessage({ role: "user", kind: "text", content: query });
       state.runs[state.currentThreadId] = newRun();
+      startElapsedTimer();
       persist(); render();
       await streamRequest(api(`/threads/${encodeURIComponent(state.currentThreadId)}/runs/stream`), {
         messages: [{ role: "user", content: query }], configurable: buildRuntimeConfig(),
@@ -217,7 +233,51 @@
     }
     if (buffer.trim()) consumeEvent(buffer);
     state.streaming = false; state.controller = null;
+    const run = currentRun();
+    if (run && !run.endedAt && ["completed", "failed", "stopped"].includes(run.status)) run.endedAt = Date.now();
+    stopElapsedTimer();
     persist(); render();
+  }
+
+  async function stopResearch() {
+    const run = currentRun();
+    if (!run || !["running", "waiting"].includes(run.status)) return;
+    const threadId = state.currentThreadId;
+    if (state.controller) state.controller.abort();
+    state.streaming = false;
+    state.controller = null;
+    run.status = "stopped";
+    run.endedAt = Date.now();
+    run.title = "研究已停止";
+    run.subtitle = "已保留停止前收集的资料与进度";
+    const activePhase = PHASES.find((phase) => run.phases[phase] === "running");
+    if (activePhase) run.phases[activePhase] = "stopped";
+    stopElapsedTimer();
+    persist(); render(); toast("已停止当前研究");
+    try { await fetch(api(`/threads/${encodeURIComponent(threadId)}/runs/stop`), { method: "POST" }); } catch { /* local abort already completed */ }
+  }
+
+  function elapsedSeconds(run = currentRun()) {
+    if (!run?.startedAt) return 0;
+    return Math.max(0, Math.floor(((run.endedAt || Date.now()) - run.startedAt) / 1000));
+  }
+
+  function formatElapsed(seconds) {
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes} 分 ${seconds % 60} 秒`;
+  }
+
+  function startElapsedTimer() {
+    stopElapsedTimer();
+    state.elapsedTimer = setInterval(() => {
+      if (els.elapsedTime) els.elapsedTime.textContent = formatElapsed(elapsedSeconds());
+    }, 1000);
+  }
+
+  function stopElapsedTimer() {
+    if (state.elapsedTimer) clearInterval(state.elapsedTimer);
+    state.elapsedTimer = null;
   }
 
   function consumeEvent(block) {
@@ -283,6 +343,7 @@
         PHASES.forEach((p) => { run.phases[p] = "completed"; });
         run.title = "研究已完成"; run.subtitle = "报告与来源已经整理完毕";
       }
+      run.endedAt = Date.now();
     }
     persist(); render();
   }
@@ -302,10 +363,12 @@
   }
 
   function handleError(error) {
+    if (error?.name === "AbortError") return;
     state.streaming = false; state.controller = null;
     const run = currentRun();
     if (run) {
       run.status = "failed";
+      run.endedAt = Date.now();
       const active = PHASES.find((p) => run.phases[p] === "running");
       if (active) run.phases[active] = "failed";
     }
@@ -314,7 +377,7 @@
   }
 
   function render() {
-    renderThreads(); renderMessages(); renderHeader(); renderArtifact(); updateConfigSummary();
+    renderThreads(); renderMessages(); renderHeader(); renderArtifact(); renderTaskPanel(); updateConfigSummary();
   }
 
   function renderThreads() {
@@ -394,15 +457,29 @@
 
   function renderRunCard(run) {
     const completed = PHASES.filter((p) => run.phases[p] === "completed").length;
-    const pct = run.status === "completed" ? 100 : Math.round((completed + (PHASES.some((p) => run.phases[p] === "running") ? .35 : 0)) / PHASES.length * 100);
-    const labels = { running: "执行中", waiting: "等待确认", completed: "已完成", failed: "运行失败" };
-    const recent = run.activities.slice(-6).reverse();
-    return `<article class="run-card">
-      <div class="run-card-head"><span class="run-icon">⌁</span><span class="run-title"><strong>${escapeHtml(run.title || "研究任务")}</strong><small>${escapeHtml(run.subtitle || "正在准备")}</small></span><span class="run-state ${run.status}">${labels[run.status] || run.status}</span></div>
-      <div class="run-card-body"><div class="progress-overview"><div class="progress-track"><i style="width:${pct}%"></i></div><b>${pct}%</b></div>
-        <div class="phase-list">${PHASES.map((phase) => { const info = PHASE_LABELS[phase]; const status = run.phases[phase] || "pending"; return `<div class="phase-item ${status}"><span class="phase-dot">${status === "completed" ? "✓" : status === "failed" ? "!" : ""}</span><span class="phase-copy"><strong>${info[0]}</strong><small>${status === "running" ? info[1] : status === "completed" ? "已完成" : "等待中"}</small></span></div>`; }).join("")}</div>
-        ${recent.length ? `<div class="activity-section"><div class="activity-heading"><strong>实时活动</strong><span>已触发 ${run.searchCount} 次检索 · 每方向上限 ${run.budget}</span></div><div class="activity-list">${recent.map((item) => `<div class="activity-item ${item.status}"><i class="activity-mark"></i><span class="activity-copy"><strong>${escapeHtml(item.title || item.query || item.topic || "正在处理")}</strong><small>${escapeHtml(item.detail || item.message || activityDetail(item))}</small></span><span class="activity-source">${escapeHtml(item.source || item.type || "agent")}</span></div>`).join("")}</div></div>` : ""}
-      </div></article>`;
+    const labels = { running: "正在执行", waiting: "等待确认", completed: "研究完成", failed: "运行失败", stopped: "已停止" };
+    const active = PHASES.find((phase) => run.phases[phase] === "running");
+    return `<article class="run-card compact-run">
+      <span class="run-pulse ${run.status}"></span>
+      <span class="run-title"><strong>${escapeHtml(run.title || "研究任务")}</strong><small>${escapeHtml(active ? PHASE_LABELS[active][1] : run.subtitle || labels[run.status])}</small></span>
+      <span class="run-inline-meta">${completed}/4 · ${formatElapsed(elapsedSeconds(run))}</span>
+      <button class="task-link" data-action="show-tasks">查看任务</button>
+    </article>`;
+  }
+
+  function renderTaskPanel() {
+    const run = currentRun();
+    els.taskPanel.hidden = !run;
+    if (!run) return;
+    const completed = PHASES.filter((phase) => run.phases[phase] === "completed").length;
+    $("taskProgress").textContent = `已完成 ${completed}/${PHASES.length}`;
+    els.elapsedTime.textContent = formatElapsed(elapsedSeconds(run));
+    els.taskPanelBody.innerHTML = PHASES.map((phase) => {
+      const status = run.phases[phase] || "pending";
+      const displayStatus = run.status === "stopped" && status === "running" ? "stopped" : status;
+      const detail = displayStatus === "completed" ? "已完成" : displayStatus === "running" ? PHASE_LABELS[phase][1] : displayStatus === "failed" ? "执行失败" : displayStatus === "stopped" ? "已停止" : "等待中";
+      return `<div class="task-item ${displayStatus}"><span>${displayStatus === "completed" ? "✓" : displayStatus === "failed" || displayStatus === "stopped" ? "!" : ""}</span><div><strong>${PHASE_LABELS[phase][0]}</strong><small>${detail}</small></div></div>`;
+    }).join("") + (run.activities.length ? `<div class="task-current"><i></i><span><strong>${escapeHtml(run.activities.at(-1).title || run.activities.at(-1).query || "正在处理资料")}</strong><small>${escapeHtml(activityDetail(run.activities.at(-1)))}</small></span></div>` : "");
   }
 
   function activityDetail(item) {
@@ -422,6 +499,7 @@
     els.runBadge.hidden = !active;
     if (active) els.runBadge.querySelector("b").textContent = run.status === "waiting" ? "等待确认" : "研究中";
     els.send.disabled = state.streaming;
+    $("stopResearch").hidden = !(run && ["running", "waiting"].includes(run.status));
     els.showReport.hidden = !state.currentThreadId || !state.reports[state.currentThreadId];
   }
 
@@ -447,20 +525,22 @@
 
   function updateConfigSummary() {
     const sourceNames = { tavily: "Tavily", duckduckgo: "DuckDuckGo", openai: "OpenAI Search", anthropic: "Anthropic Search" };
-    const depthNames = { quick: "快速", standard: "标准", deep: "深度", custom: "自定义" };
-    $("configSummary").innerHTML = `<span class="model-dot"></span>${escapeHtml(modelDisplay())} · ${escapeHtml(config.search_apis.map((x) => sourceNames[x] || x).join(" + "))} · ${depthNames[config.depth] || "自定义"}研究`;
+    $("configSummary").innerHTML = `<span class="model-dot"></span>${escapeHtml(modelDisplay())} · ${escapeHtml(config.search_apis.map((x) => sourceNames[x] || x).join(" + "))} · 最多 ${config.max_search_calls} 轮深搜`;
   }
 
   function applyConfigToForm() {
-    document.querySelectorAll("[data-depth]").forEach((button) => button.classList.toggle("active", button.dataset.depth === config.depth));
     $("searchBudget").value = config.max_search_calls; $("searchBudgetValue").textContent = config.max_search_calls;
-    $("concurrency").value = config.max_concurrent_research_units; $("concurrencyValue").textContent = config.max_concurrent_research_units;
     document.querySelectorAll('input[name="source"]').forEach((input) => { input.checked = config.search_apis.includes(input.value); });
     $("modelProvider").value = config.model_provider; $("modelName").value = config.model_name;
     $("ollamaBaseUrl").value = config.ollama_base_url; $("sameModel").checked = config.same_model;
     $("researchModel").value = config.research_model; $("summarizationModel").value = config.summarization_model;
     $("compressionModel").value = config.compression_model; $("reportModel").value = config.final_report_model;
-    $("allowClarification").checked = config.allow_clarification; $("apiBase").value = config.api_base;
+    $("mcpEnabled").checked = config.mcp_enabled; $("mcpUrl").value = config.mcp_url;
+    $("mcpTools").value = config.mcp_tools.join(", "); $("mcpAuth").checked = config.mcp_auth_required;
+    $("mcpPrompt").value = config.mcp_prompt; $("generateReport").checked = config.generate_report;
+    $("reportLanguage").value = config.report_language; $("reportLength").value = config.report_length;
+    $("requireCitations").checked = config.require_citations; $("apiBase").value = config.api_base;
+    renderKnowledgeList();
     toggleProviderFields(); toggleAdvancedModels();
   }
 
@@ -470,16 +550,25 @@
     const modelName = $("modelName").value.trim();
     if (!modelName) throw new Error("请填写模型标识");
     return {
-      ...config, depth: document.querySelector("[data-depth].active")?.dataset.depth || "custom",
-      search_apis: sources, max_search_calls: Number($("searchBudget").value),
-      max_concurrent_research_units: Number($("concurrency").value),
-      allow_clarification: $("allowClarification").checked,
+      ...config, search_apis: sources, max_search_calls: Number($("searchBudget").value),
+      max_researcher_iterations: Number($("searchBudget").value),
+      max_react_tool_calls: Math.max(4, Number($("searchBudget").value) * 2),
+      allow_clarification: false,
       model_provider: $("modelProvider").value, model_name: modelName,
       same_model: $("sameModel").checked, ollama_base_url: $("ollamaBaseUrl").value.trim(),
       research_model: $("researchModel").value.trim() || modelName,
       summarization_model: $("summarizationModel").value.trim() || modelName,
       compression_model: $("compressionModel").value.trim() || modelName,
       final_report_model: $("reportModel").value.trim() || modelName,
+      mcp_enabled: $("mcpEnabled").checked,
+      mcp_url: $("mcpUrl").value.trim(),
+      mcp_tools: $("mcpTools").value.split(",").map((item) => item.trim()).filter(Boolean),
+      mcp_auth_required: $("mcpAuth").checked,
+      mcp_prompt: $("mcpPrompt").value.trim(),
+      generate_report: $("generateReport").checked,
+      report_language: $("reportLanguage").value,
+      report_length: $("reportLength").value,
+      require_citations: $("requireCitations").checked,
       api_base: $("apiBase").value.trim() || "/api",
     };
   }
@@ -512,6 +601,40 @@
     }
   }
 
+  function renderKnowledgeList() {
+    const list = $("knowledgeList");
+    if (!config.knowledge_bases.length) { list.innerHTML = "<span>尚未导入知识文件</span>"; return; }
+    list.innerHTML = config.knowledge_bases.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.size || "已导入")}</small></span><button type="button" data-remove-knowledge="${escapeHtml(item.id)}" aria-label="移除">×</button></div>`).join("");
+  }
+
+  async function syncKnowledgeList() {
+    try {
+      const response = await fetch(api("/knowledge"));
+      if (!response.ok) return;
+      const data = await response.json();
+      config.knowledge_bases = (data.items || []).map((item) => ({
+        id: item.id, name: item.name, size: `${item.chunks || 0} 个切片`,
+      }));
+      persist(); renderKnowledgeList();
+    } catch { /* backend may not be running while viewing static frontend */ }
+  }
+
+  async function importKnowledge(files) {
+    for (const file of files) {
+      const content = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
+      });
+      const response = await fetch(api("/knowledge"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: file.name, content, content_type: file.type }),
+      });
+      if (!response.ok) throw new Error(await response.text() || `无法导入 ${file.name}`);
+      const item = await response.json();
+      config.knowledge_bases.push({ id: item.id, name: item.name, size: `${Math.max(1, Math.round(file.size / 1024))} KB` });
+    }
+    persist(); renderKnowledgeList(); toast(`已导入 ${files.length} 个知识文件`);
+  }
+
   function resizeInput() { els.input.style.height = "auto"; els.input.style.height = `${Math.min(els.input.scrollHeight, 130)}px`; }
   function openMobileSidebar() { els.sidebar.classList.add("mobile-open"); els.mobileOverlay.classList.add("open"); }
   function closeMobileSidebar() { els.sidebar.classList.remove("mobile-open"); els.mobileOverlay.classList.remove("open"); }
@@ -519,6 +642,12 @@
   function handleInteractionClick(event) {
     const button = event.target.closest("[data-action]");
     if (!button) return;
+    if (button.dataset.action === "show-tasks") {
+      els.taskPanel.classList.remove("collapsed");
+      $("taskPanelToggle").setAttribute("aria-expanded", "true");
+      return;
+    }
+    if (currentRun()?.status === "stopped") { toast("该研究已停止，请发起新研究继续"); return; }
     const card = button.closest("[data-card]");
     const id = button.dataset.id;
     if (button.dataset.action === "show-revise") {
@@ -552,20 +681,31 @@
     els.threadList.addEventListener("click", (event) => { const item = event.target.closest("[data-thread]"); if (item) openThread(item.dataset.thread); });
     document.querySelectorAll(".prompt-suggestion").forEach((button) => button.addEventListener("click", () => { els.input.value = button.dataset.prompt; resizeInput(); els.input.focus(); }));
     $("newResearch").addEventListener("click", newResearchView);
-    $("sidebarCollapse").addEventListener("click", () => els.sidebar.classList.toggle("collapsed"));
+    $("sidebarCollapse").addEventListener("click", () => { els.sidebar.classList.add("collapsed"); $("sidebarExpand").classList.add("visible"); });
+    $("sidebarExpand").addEventListener("click", () => { els.sidebar.classList.remove("collapsed"); $("sidebarExpand").classList.remove("visible"); });
     $("mobileMenu").addEventListener("click", openMobileSidebar); els.mobileOverlay.addEventListener("click", closeMobileSidebar);
     [$("openSettings"), $("headerSettings"), $("configSummary")].forEach((el) => el.addEventListener("click", openSettings));
     $("closeSettings").addEventListener("click", closeSettings); els.drawerOverlay.addEventListener("click", closeSettings);
-    document.querySelectorAll("[data-depth]").forEach((button) => button.addEventListener("click", () => {
-      document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b === button));
-      const preset = PRESETS[button.dataset.depth];
-      if (preset) { $("searchBudget").value = preset.max_search_calls; $("concurrency").value = preset.max_concurrent_research_units; $("searchBudgetValue").textContent = preset.max_search_calls; $("concurrencyValue").textContent = preset.max_concurrent_research_units; }
-    }));
-    $("searchBudget").addEventListener("input", (event) => { $("searchBudgetValue").textContent = event.target.value; document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b.dataset.depth === "custom")); });
-    $("concurrency").addEventListener("input", (event) => { $("concurrencyValue").textContent = event.target.value; document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b.dataset.depth === "custom")); });
+    $("searchBudget").addEventListener("input", (event) => { $("searchBudgetValue").textContent = event.target.value; });
     $("modelProvider").addEventListener("change", toggleProviderFields); $("sameModel").addEventListener("change", toggleAdvancedModels);
     $("ollamaModel").addEventListener("change", (event) => { if (event.target.value) $("modelName").value = `ollama:${event.target.value}`; });
     $("refreshOllama").addEventListener("click", refreshOllama);
+    $("stopResearch").addEventListener("click", stopResearch);
+    $("taskPanelToggle").addEventListener("click", () => {
+      const collapsed = els.taskPanel.classList.toggle("collapsed");
+      $("taskPanelToggle").setAttribute("aria-expanded", String(!collapsed));
+    });
+    $("importKnowledge").addEventListener("click", () => $("knowledgeFiles").click());
+    $("knowledgeFiles").addEventListener("change", async (event) => {
+      try { await importKnowledge([...event.target.files]); } catch (error) { toast(error.message); }
+      event.target.value = "";
+    });
+    $("knowledgeList").addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-remove-knowledge]"); if (!button) return;
+      const id = button.dataset.removeKnowledge;
+      try { await fetch(api(`/knowledge/${encodeURIComponent(id)}`), { method: "DELETE" }); } catch { /* remove local reference anyway */ }
+      config.knowledge_bases = config.knowledge_bases.filter((item) => item.id !== id); persist(); renderKnowledgeList();
+    });
     $("saveSettings").addEventListener("click", () => { try { config = collectConfig(); persist(); updateConfigSummary(); applyTheme(); closeSettings(); toast("研究设置已保存"); } catch (error) { toast(error.message); } });
     $("resetSettings").addEventListener("click", () => { config = structuredClone(DEFAULT_CONFIG); applyConfigToForm(); toast("已恢复默认设置，保存后生效"); });
     $("themeToggle").addEventListener("click", () => { config.theme = config.theme === "dark" ? "light" : "dark"; applyTheme(); persist(); });
@@ -581,5 +721,5 @@
     $("themeLabel").textContent = config.theme === "dark" ? "浅色模式" : "深色模式";
   }
 
-  applyTheme(); applyConfigToForm(); bindEvents(); render(); resizeInput();
+  applyTheme(); applyConfigToForm(); bindEvents(); render(); resizeInput(); syncKnowledgeList();
 })();

@@ -165,6 +165,18 @@ async def write_research_plan(
 ) -> Command[Literal["review_research_plan"]]:
     """Generate a structured, user-visible research plan."""
     configurable = Configuration.from_runnable_config(config)
+    if not configurable.generate_report:
+        digest = "# 研究摘要与资料\n\n" + (findings or "本轮未形成可用研究资料。")
+        message = AIMessage(content=digest)
+        return {"final_report": digest, "messages": [message], **cleared_state}
+
+    language_instruction = "使用简体中文" if configurable.report_language == "zh-CN" else "Write in English"
+    length_instruction = {
+        "brief": "控制在约 2000 字，突出结论",
+        "standard": "控制在约 5000 字，兼顾论证与可读性",
+        "long": "生成 10000 字以上的详细报告，充分展开证据与局限",
+    }.get(configurable.report_length, "生成结构完整、篇幅适中的报告")
+    citation_instruction = "所有重要事实和关键结论必须附可追溯来源引用" if configurable.require_citations else "对可核验事实保留必要引用"
     research_model_config = _model_runtime_config(
         configurable.research_model,
         configurable.research_model_max_tokens,
@@ -787,6 +799,7 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 findings=findings,
                 date=get_today_str()
             )
+            final_report_prompt += f"\n\n交付要求：{language_instruction}；{length_instruction}；{citation_instruction}。"
             
             # Generate the final report
             final_report = await configurable_model.with_config(writer_model_config).ainvoke([

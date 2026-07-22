@@ -16,6 +16,7 @@ services:
       - GET_API_KEYS_FROM_CONFIG=false
     volumes:
       - ./src:/app/src
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:2024/ok')"]
       interval: 15s

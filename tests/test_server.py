@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
+from langchain_core.documents import Document
 
 import server
 from open_deep_research.configuration import Configuration, SearchAPI
@@ -99,6 +100,23 @@ class ServerHelpersTest(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
         finally:
             server.threads.pop(thread_id, None)
+
+    def test_title_fallback_rewrites_polite_prefix(self):
+        self.assertEqual(server._fallback_title("请帮我调研 RAG 的发展趋势"), "RAG 的发展趋势")
+
+    def test_knowledge_context_uses_framework_retriever(self):
+        server.knowledge_bases["kb-test"] = {
+            "documents": [
+                Document(page_content="Project Aurora launches in 2027", metadata={"source": "brief.md"}),
+                Document(page_content="Unrelated catering policy", metadata={"source": "other.md"}),
+            ]
+        }
+        try:
+            context = server._knowledge_context(["kb-test"], "Aurora launch")
+            self.assertIn("Project Aurora", context)
+            self.assertIn("brief.md", context)
+        finally:
+            server.knowledge_bases.pop("kb-test", None)
 
 
 if __name__ == "__main__":

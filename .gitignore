@@ -58,6 +58,7 @@ logs/
 
 # Dependencies
 node_modules/
+data/
 
 # LangGraph specific
 .langgraph/

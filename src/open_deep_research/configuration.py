@@ -242,6 +242,26 @@ class Configuration(BaseModel):
             }
         }
     )
+    knowledge_base_ids: List[str] = Field(
+        default_factory=list,
+        description="Local knowledge collections to retrieve for this run.",
+    )
+    generate_report: bool = Field(
+        default=True,
+        description="Whether to synthesize a full report after research.",
+    )
+    report_language: str = Field(
+        default="zh-CN",
+        description="Language requested for the final report.",
+    )
+    report_length: str = Field(
+        default="standard",
+        description="Requested final report length: brief, standard, or long.",
+    )
+    require_citations: bool = Field(
+        default=True,
+        description="Require traceable citations for material claims.",
+    )
 
 
     @classmethod

@@ -1,9 +1,14 @@
 """Standalone FastAPI server for the checkpointed deep-research graph."""
 
+import asyncio
+import base64
 import json
 import logging
+import os
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -13,11 +18,14 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.types import Command
 
 from open_deep_research.configuration import Configuration, SearchAPI
-from open_deep_research.deep_researcher import deep_researcher
+from open_deep_research.deep_researcher import _model_runtime_config, configurable_model, deep_researcher
 from open_deep_research.utils import get_api_key_for_model, get_tavily_api_key
 
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +33,111 @@ logger = logging.getLogger("open_deep_research.server")
 
 app = FastAPI(title="Open Deep Research API")
 threads: dict[str, dict[str, Any]] = {}
+knowledge_bases: dict[str, dict[str, Any]] = {}
+KNOWLEDGE_DIR = Path(os.environ.get("ODR_DATA_DIR", "./data")) / "knowledge"
+
+
+def _load_knowledge_bases() -> None:
+    """Restore normalized LangChain documents from the persistent store."""
+    if not KNOWLEDGE_DIR.exists():
+        return
+    for path in KNOWLEDGE_DIR.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            documents = [
+                Document(page_content=item["page_content"], metadata=item.get("metadata") or {})
+                for item in payload.get("documents", [])
+            ]
+            if documents:
+                knowledge_bases[payload["id"]] = {**payload, "documents": documents}
+        except Exception as exc:
+            logger.warning("Skipping invalid knowledge store %s: %s", path.name, exc)
+
+
+def _persist_knowledge_base(item: dict[str, Any]) -> None:
+    """Persist normalized chunks so container restarts do not invalidate UI references."""
+    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "id": item["id"],
+        "name": item["name"],
+        "documents": [
+            {"page_content": document.page_content, "metadata": document.metadata}
+            for document in item["documents"]
+        ],
+    }
+    (KNOWLEDGE_DIR / f"{item['id']}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+_load_knowledge_bases()
+
+
+def _fallback_title(query: str) -> str:
+    """Create a stable short title when a title model is unavailable."""
+    compact = re.sub(r"\s+", " ", query).strip()
+    compact = re.sub(r"^(?:请?帮我|麻烦|我想|请你|请)(?:调研|研究|分析|了解)?", "", compact).strip(" ，。！？")
+    return (compact[:24] + "…") if len(compact) > 24 else (compact or "新研究")
+
+
+def _extract_knowledge(name: str, encoded: str) -> list[Document]:
+    """Parse an upload into LangChain documents with source/page metadata."""
+    raw = encoded.split(",", 1)[1] if "," in encoded else encoded
+    payload = base64.b64decode(raw)
+    if name.lower().endswith(".pdf"):
+        import fitz
+        document = fitz.open(stream=payload, filetype="pdf")
+        return [
+            Document(page_content=page.get_text(), metadata={"source": name, "page": index + 1})
+            for index, page in enumerate(document)
+            if page.get_text().strip()
+        ]
+    text = payload.decode("utf-8", errors="replace")
+    return [Document(page_content=text, metadata={"source": name})]
+
+
+def _knowledge_context(ids: list[str], query: str, limit: int = 14000) -> str:
+    """Retrieve local chunks through LangChain's BM25 retriever."""
+    documents: list[Document] = []
+    for item_id in ids:
+        item = knowledge_bases.get(item_id)
+        if item:
+            documents.extend(item["documents"])
+    if not documents:
+        return ""
+    retriever = BM25Retriever.from_documents(documents, k=min(8, len(documents)))
+    results = retriever.invoke(query)
+    selected, length = [], 0
+    for document in results:
+        if length + len(document.page_content) > limit:
+            break
+        source = document.metadata.get("source", "本地资料")
+        page = f"，第 {document.metadata['page']} 页" if document.metadata.get("page") else ""
+        selected.append(f"[知识库：{source}{page}]\n{document.page_content}")
+        length += len(document.page_content)
+    return "\n\n".join(selected)
+
+
+async def _generate_title(query: str, configurable: dict[str, Any]) -> str:
+    """Ask the selected lightweight model for a compact conversation title."""
+    fallback = _fallback_title(query)
+    try:
+        parsed = Configuration.from_runnable_config({"configurable": configurable})
+        if not parsed.research_model.lower().startswith("ollama:") and not get_api_key_for_model(
+            parsed.research_model, {"configurable": configurable}
+        ):
+            return fallback
+        settings = _model_runtime_config(parsed.research_model, 80, parsed, {"configurable": configurable})
+        result = await asyncio.wait_for(
+            configurable_model.with_config(settings).ainvoke([
+                HumanMessage(content=f"将下面的研究问题改写成一个不超过16个汉字的会话标题。只输出标题，不加引号或标点。\n\n{query}")
+            ]), timeout=8,
+        )
+        title = re.sub(r"[\r\n\"'《》]", "", str(result.content)).strip(" 。！？:：")
+        return title[:24] or fallback
+    except Exception as exc:
+        logger.warning("Title generation unavailable; using local fallback: %s", exc)
+        return fallback
 
 
 def _message_to_wire(message: BaseMessage | dict[str, Any]) -> dict[str, Any]:
@@ -163,8 +276,16 @@ async def _research_event_stream(
         )
         thread["configurable"] = configurable
         new_messages = input_data.get("messages") or input_data.get("input", {}).get("messages", [])
+        knowledge_ids = configurable.get("knowledge_base_ids") or []
+        user_query = new_messages[-1].get("content", "") if new_messages else ""
+        local_context = _knowledge_context(knowledge_ids, user_query) if knowledge_ids else ""
         graph_input: Any = {
-            "messages": [HumanMessage(content=item.get("content", "")) for item in new_messages]
+            "messages": [HumanMessage(content=(
+                item.get("content", "") + (
+                    "\n\n以下是与问题相关的本地知识库片段。请将其作为内部资料使用，并在报告中标注对应知识库文件名：\n" + local_context
+                    if local_context and item is new_messages[-1] else ""
+                )
+            )) for item in new_messages]
         }
     else:
         configurable = thread.get("configurable", {})
@@ -180,6 +301,10 @@ async def _research_event_stream(
         yield _sse("run", {"status": "running", "thread_id": thread_id})
 
         async for event in deep_researcher.astream_events(graph_input, run_config, version="v2"):
+            if thread.get("stop_requested"):
+                thread["status"] = "stopped"
+                yield _sse("end", {"status": "stopped"})
+                return
             kind = event.get("event", "")
             name = event.get("name", "")
             data = event.get("data", {}) or {}
@@ -229,6 +354,9 @@ async def _research_event_stream(
         yield _sse("state", state)
         yield _sse("end", {"status": "completed"})
 
+    except asyncio.CancelledError:
+        thread["status"] = "stopped"
+        raise
     except Exception as exc:
         logger.exception("Research stream error")
         thread["status"] = "failed"
@@ -250,18 +378,73 @@ def _stream_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
 
 
 @app.post("/threads")
-async def create_thread():
+async def create_thread(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
     thread_id = str(uuid.uuid4())
     threads[thread_id] = {
         "state": {}, "configurable": {}, "pending": None,
-        "status": "idle", "activities": [],
+        "status": "idle", "activities": [], "stop_requested": False,
     }
-    return {"thread_id": thread_id}
+    title = await _generate_title(payload.get("query", ""), payload.get("configurable") or {})
+    return {"thread_id": thread_id, "title": title}
 
 
 @app.post("/threads/{thread_id}/runs/stream")
 async def run_stream(thread_id: str, request: Request):
+    if thread_id in threads:
+        threads[thread_id]["stop_requested"] = False
     return _stream_response(_research_event_stream(thread_id, input_data=await request.json()))
+
+
+@app.post("/threads/{thread_id}/runs/stop")
+async def stop_run(thread_id: str):
+    thread = threads.get(thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="研究任务不存在")
+    thread["stop_requested"] = True
+    thread["status"] = "stopped"
+    thread["pending"] = None
+    return {"status": "stopped"}
+
+
+@app.post("/knowledge")
+async def add_knowledge(request: Request):
+    payload = await request.json()
+    name = str(payload.get("name") or "未命名资料")
+    try:
+        source_documents = _extract_knowledge(name, str(payload.get("content") or ""))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法解析知识文件：{exc}") from exc
+    if not source_documents:
+        raise HTTPException(status_code=400, detail="知识文件中没有可检索文本")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=180)
+    documents = splitter.split_documents(source_documents)
+    item_id = str(uuid.uuid4())
+    for document in documents:
+        document.metadata["knowledge_base_id"] = item_id
+    knowledge_bases[item_id] = {"id": item_id, "name": name, "documents": documents}
+    _persist_knowledge_base(knowledge_bases[item_id])
+    return {"id": item_id, "name": name, "chunks": len(documents)}
+
+
+@app.get("/knowledge")
+async def list_knowledge():
+    return {
+        "items": [
+            {"id": item["id"], "name": item["name"], "chunks": len(item["documents"])}
+            for item in knowledge_bases.values()
+        ]
+    }
+
+
+@app.delete("/knowledge/{item_id}")
+async def delete_knowledge(item_id: str):
+    knowledge_bases.pop(item_id, None)
+    (KNOWLEDGE_DIR / f"{item_id}.json").unlink(missing_ok=True)
+    return {"status": "deleted"}
 
 
 @app.post("/threads/{thread_id}/runs/resume")

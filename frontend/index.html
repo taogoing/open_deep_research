@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark" />
   <title>Open Deep Research</title>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="/styles.css?v=7" />
+  <link rel="stylesheet" href="/styles.css?v=10" />
 </head>
 <body>
   <div class="app-shell">
@@ -36,6 +36,10 @@
       </div>
     </aside>
 
+    <button class="sidebar-expand" id="sidebarExpand" aria-label="展开侧栏" title="展开侧栏">
+      <svg viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></svg>
+    </button>
+
     <main class="workspace">
       <header class="topbar">
         <button class="icon-button mobile-menu" id="mobileMenu" aria-label="打开侧栏">
@@ -46,6 +50,7 @@
           <span id="pageSubtitle">从一个好问题开始</span>
         </div>
         <div class="run-badge" id="runBadge" hidden><span></span><b>研究中</b></div>
+        <button class="stop-button" id="stopResearch" hidden><span></span>停止研究</button>
         <button class="topbar-button" id="showReport" hidden>
           <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7"/></svg><span>查看报告</span>
         </button>
@@ -88,6 +93,18 @@
       </footer>
     </main>
 
+    <aside class="task-panel" id="taskPanel" hidden>
+      <button class="task-panel-toggle" id="taskPanelToggle" aria-expanded="true" title="折叠任务清单">
+        <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="task-panel-head">
+        <span class="task-check">✓</span>
+        <div><strong>任务清单</strong><small id="taskProgress">已完成 0/4</small></div>
+        <time id="elapsedTime">0 秒</time>
+      </div>
+      <div class="task-panel-body" id="taskPanelBody"></div>
+    </aside>
+
     <aside class="artifact-panel" id="artifactPanel">
       <div class="panel-header">
         <div><span class="panel-kicker">RESEARCH OUTPUT</span><strong>研究报告</strong></div>
@@ -109,12 +126,8 @@
     </div>
     <div class="drawer-body">
       <section class="settings-section">
-        <div class="section-heading"><span>01</span><div><strong>研究深度</strong><small>控制搜索预算、并行度和研究时长</small></div></div>
-        <div class="segmented" id="depthPreset">
-          <button data-depth="quick">快速</button><button class="active" data-depth="standard">标准</button><button data-depth="deep">深度</button><button data-depth="custom">自定义</button>
-        </div>
-        <div class="range-setting"><label>每个方向搜索预算 <b id="searchBudgetValue">8</b></label><input id="searchBudget" type="range" min="1" max="30" value="8" /></div>
-        <div class="range-setting"><label>并行研究方向 <b id="concurrencyValue">5</b></label><input id="concurrency" type="range" min="1" max="10" value="5" /></div>
+        <div class="section-heading"><span>01</span><div><strong>深度搜索预算</strong><small>控制自主评估、改写 query 并继续检索的迭代上限</small></div></div>
+        <div class="range-setting budget-only"><label>深度搜索次数 <b id="searchBudgetValue">6</b></label><input id="searchBudget" type="range" min="1" max="20" value="6" /><p>每轮会判断现有信息是否满足需求；不足时自动改写 query 并进入下一轮，直至达到上限。</p></div>
       </section>
 
       <section class="settings-section">
@@ -145,8 +158,33 @@
         </div>
       </section>
 
+      <section class="settings-section">
+        <div class="section-heading"><span>04</span><div><strong>知识库检索</strong><small>导入本地资料，研究时优先检索并引用</small></div></div>
+        <input id="knowledgeFiles" type="file" accept=".txt,.md,.csv,.json,.pdf" multiple hidden />
+        <button class="import-button" id="importKnowledge">＋ 导入知识文件</button>
+        <div class="knowledge-list" id="knowledgeList"><span>尚未导入知识文件</span></div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><span>05</span><div><strong>MCP 服务</strong><small>连接远程工具；Skills 更适合固化流程，不替代 MCP 数据与工具连接</small></div></div>
+        <label class="switch-row"><span><strong>启用 MCP</strong><small>仅在研究任务需要时调用已授权工具</small></span><input id="mcpEnabled" type="checkbox"><i></i></label>
+        <div id="mcpFields">
+          <label class="field-label">MCP 服务地址<input id="mcpUrl" placeholder="https://example.com" /></label>
+          <label class="field-label">允许的工具（逗号分隔）<input id="mcpTools" placeholder="search, fetch_document" /></label>
+          <label class="switch-row"><span><strong>需要身份认证</strong></span><input id="mcpAuth" type="checkbox"><i></i></label>
+          <label class="field-label">工具使用说明<input id="mcpPrompt" placeholder="例如：优先检索内部正式文档" /></label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading"><span>06</span><div><strong>报告生成配置</strong><small>控制最终交付物的语言、篇幅和引用方式</small></div></div>
+        <label class="switch-row"><span><strong>生成研究报告</strong><small>关闭后仅返回研究摘要与来源</small></span><input id="generateReport" type="checkbox" checked><i></i></label>
+        <label class="field-label">报告语言<select id="reportLanguage"><option value="zh-CN">简体中文</option><option value="en">English</option></select></label>
+        <label class="field-label">报告篇幅<select id="reportLength"><option value="brief">精简（约 2k 字）</option><option value="standard">标准（约 5k 字）</option><option value="long">详细（1w 字以上）</option></select></label>
+        <label class="switch-row"><span><strong>强制来源引用</strong><small>关键结论需附可追溯来源</small></span><input id="requireCitations" type="checkbox" checked><i></i></label>
+      </section>
+
       <section class="settings-section compact-section">
-        <label class="switch-row"><span><strong>允许范围澄清</strong><small>问题模糊时先询问重点，可随时跳过</small></span><input id="allowClarification" type="checkbox" checked><i></i></label>
         <label class="field-label">后端 API 地址<input id="apiBase" value="/api" /></label>
       </section>
     </div>
@@ -154,6 +192,6 @@
   </aside>
 
   <div class="toast" id="toast"></div>
-  <script src="/app.js?v=8"></script>
+  <script src="/app.js?v=14"></script>
 </body>
 </html>

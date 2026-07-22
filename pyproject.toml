@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "langgraph>=1.0.0",
     "langchain-community>=0.3.9",
+    "rank-bm25>=0.2.2",
     "langchain-openai>=0.3.28",
     "langchain-anthropic>=0.3.15",
     "langchain-mcp-adapters>=0.1.6",
