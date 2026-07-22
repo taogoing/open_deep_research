@@ -5,6 +5,7 @@ import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -14,8 +15,9 @@ from langchain_core.messages import (
     get_buffer_string,
 )
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from open_deep_research.configuration import (
     Configuration,
@@ -26,8 +28,8 @@ from open_deep_research.prompts import (
     compress_research_system_prompt,
     final_report_generation_prompt,
     lead_researcher_prompt,
+    research_plan_prompt,
     research_system_prompt,
-    transform_messages_into_research_topic_prompt,
 )
 from open_deep_research.state import (
     AgentInputState,
@@ -35,9 +37,9 @@ from open_deep_research.state import (
     ClarifyWithUser,
     ConductResearch,
     ResearchComplete,
+    ResearchPlan,
     ResearcherOutputState,
     ResearcherState,
-    ResearchQuestion,
     SupervisorState,
 )
 from open_deep_research.utils import (
@@ -55,10 +57,31 @@ from open_deep_research.utils import (
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
 )
 
-async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
+
+def _model_runtime_config(
+    model: str,
+    max_tokens: int,
+    configurable: Configuration,
+    config: RunnableConfig,
+) -> dict:
+    """Build provider-aware runtime settings for a configurable chat model."""
+    settings = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "api_key": get_api_key_for_model(model, config),
+        "tags": ["langsmith:nostream"],
+    }
+    if model.lower().startswith("ollama:"):
+        settings["base_url"] = configurable.ollama_base_url
+    return settings
+
+
+async def clarify_with_user(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["request_clarification", "write_research_plan"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
     
     This function determines whether the user's request needs clarification before proceeding
@@ -75,16 +98,16 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     configurable = Configuration.from_runnable_config(config)
     if not configurable.allow_clarification:
         # Skip clarification step and proceed directly to research
-        return Command(goto="write_research_brief")
+        return Command(goto="write_research_plan")
     
     # Step 2: Prepare the model for structured clarification analysis
     messages = state["messages"]
-    model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    model_config = _model_runtime_config(
+        configurable.research_model,
+        configurable.research_model_max_tokens,
+        configurable,
+        config,
+    )
     
     # Configure model with structured output and retry logic
     clarification_model = (
@@ -103,73 +126,114 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     
     # Step 4: Route based on clarification analysis
     if response.need_clarification:
-        # End with clarifying question for user
         return Command(
-            goto=END, 
-            update={"messages": [AIMessage(content=response.question)]}
+            goto="request_clarification",
+            update={"clarification": response},
         )
-    else:
-        # Proceed to research with verification message
-        return Command(
-            goto="write_research_brief", 
-            update={"messages": [AIMessage(content=response.verification)]}
-        )
+    return Command(
+        goto="write_research_plan",
+        update={"messages": [AIMessage(content=response.verification)]},
+    )
 
 
-async def write_research_brief(state: AgentState, config: RunnableConfig) -> Command[Literal["research_supervisor"]]:
-    """Transform user messages into a structured research brief and initialize supervisor.
-    
-    This function analyzes the user's messages and generates a focused research brief
-    that will guide the research supervisor. It also sets up the initial supervisor
-    context with appropriate prompts and instructions.
-    
-    Args:
-        state: Current agent state containing user messages
-        config: Runtime configuration with model settings
-        
-    Returns:
-        Command to proceed to research supervisor with initialized context
-    """
-    # Step 1: Set up the research model for structured output
+async def request_clarification(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["write_research_plan"]]:
+    """Pause for optional scope feedback before creating the plan."""
+    clarification = state.get("clarification")
+    payload = (
+        clarification.model_dump()
+        if hasattr(clarification, "model_dump")
+        else dict(clarification or {})
+    )
+    decision = interrupt({"type": "clarification", **payload})
+    action = decision.get("action", "skip") if isinstance(decision, dict) else "skip"
+    if action == "supplement":
+        selected = decision.get("selected", [])
+        feedback = str(decision.get("feedback", "")).strip()
+        details = "；".join([*selected, feedback] if feedback else selected)
+        if details:
+            return Command(
+                goto="write_research_plan",
+                update={"messages": [HumanMessage(content=f"补充研究要求：{details}")]},
+            )
+    return Command(goto="write_research_plan")
+
+
+async def write_research_plan(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["review_research_plan"]]:
+    """Generate a structured, user-visible research plan."""
     configurable = Configuration.from_runnable_config(config)
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
-    
-    # Configure model for structured research question generation
+    research_model_config = _model_runtime_config(
+        configurable.research_model,
+        configurable.research_model_max_tokens,
+        configurable,
+        config,
+    )
     research_model = (
         configurable_model
-        .with_structured_output(ResearchQuestion)
+        .with_structured_output(ResearchPlan)
         .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
         .with_config(research_model_config)
     )
-    
-    # Step 2: Generate structured research brief from user messages
-    prompt_content = transform_messages_into_research_topic_prompt.format(
+    prompt_content = research_plan_prompt.format(
         messages=get_buffer_string(state.get("messages", [])),
-        date=get_today_str()
+        date=get_today_str(),
+        max_search_calls=configurable.max_search_calls,
     )
-    response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
-    
-    # Step 3: Initialize supervisor with research brief and instructions
+    plan = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    return Command(
+        goto="review_research_plan",
+        update={"research_plan": plan},
+    )
+
+
+async def review_research_plan(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["write_research_plan", "research_supervisor"]]:
+    """Pause for plan approval or revision, then initialize the supervisor."""
+    configurable = Configuration.from_runnable_config(config)
+    plan = state.get("research_plan")
+    if plan is None:
+        return Command(goto="write_research_plan")
+    if isinstance(plan, dict):
+        plan = ResearchPlan.model_validate(plan)
+    decision = interrupt({
+        "type": "research_plan",
+        "plan": plan.model_dump(),
+        "search_budget": configurable.max_search_calls,
+        "search_sources": [source.value for source in configurable.search_apis],
+    })
+    action = decision.get("action", "approve") if isinstance(decision, dict) else "approve"
+    if action == "revise":
+        feedback = str(decision.get("feedback", "")).strip()
+        return Command(
+            goto="write_research_plan",
+            update={
+                "messages": [HumanMessage(content=f"请按以下意见修改研究方案：{feedback}")],
+                "plan_revision_count": state.get("plan_revision_count", 0) + 1,
+            },
+        )
+
+    research_brief = f"{plan.title}\n\n{plan.objective}\n\n" + "\n".join(
+        f"{index + 1}. {section.title}: {section.description}"
+        for index, section in enumerate(plan.sections)
+    )
     supervisor_system_prompt = lead_researcher_prompt.format(
         date=get_today_str(),
         max_concurrent_research_units=configurable.max_concurrent_research_units,
         max_researcher_iterations=configurable.max_researcher_iterations
     )
-    
     return Command(
-        goto="research_supervisor", 
+        goto="research_supervisor",
         update={
-            "research_brief": response.research_brief,
+            "research_brief": research_brief,
             "supervisor_messages": {
                 "type": "override",
                 "value": [
                     SystemMessage(content=supervisor_system_prompt),
-                    HumanMessage(content=response.research_brief)
+                    HumanMessage(content=research_brief),
                 ]
             }
         }
@@ -192,12 +256,12 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     """
     # Step 1: Configure the supervisor model with available tools
     configurable = Configuration.from_runnable_config(config)
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    research_model_config = _model_runtime_config(
+        configurable.research_model,
+        configurable.research_model_max_tokens,
+        configurable,
+        config,
+    )
     
     # Available tools: research delegation, completion signaling, and strategic thinking
     lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
@@ -292,14 +356,43 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             allowed_conduct_research_calls = conduct_research_calls[:configurable.max_concurrent_research_units]
             overflow_conduct_research_calls = conduct_research_calls[configurable.max_concurrent_research_units:]
             
-            # Execute research tasks in parallel
-            research_tasks = [
-                researcher_subgraph.ainvoke({
+            async def run_research_unit(tool_call):
+                topic = tool_call["args"]["research_topic"]
+                unit_id = tool_call["id"]
+                await adispatch_custom_event(
+                    "research_activity",
+                {
+                    "id": f"unit:{unit_id}",
+                    "type": "research.unit.started",
+                        "status": "running",
+                        "unit_id": unit_id,
+                        "title": topic[:120],
+                        "detail": "子研究任务已开始",
+                    },
+                    config=config,
+                )
+                result = await researcher_subgraph.ainvoke({
                     "researcher_messages": [
-                        HumanMessage(content=tool_call["args"]["research_topic"])
+                        HumanMessage(content=topic)
                     ],
-                    "research_topic": tool_call["args"]["research_topic"]
-                }, config) 
+                    "research_topic": topic,
+                }, config)
+                await adispatch_custom_event(
+                    "research_activity",
+                {
+                    "id": f"unit:{unit_id}",
+                    "type": "research.unit.completed",
+                        "status": "completed",
+                        "unit_id": unit_id,
+                        "title": topic[:120],
+                        "detail": "已完成资料整理与摘要",
+                    },
+                    config=config,
+                )
+                return result
+
+            research_tasks = [
+                run_research_unit(tool_call)
                 for tool_call in allowed_conduct_research_calls
             ]
             
@@ -383,12 +476,12 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         )
     
     # Step 2: Configure the researcher model with tools
-    research_model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    research_model_config = _model_runtime_config(
+        configurable.research_model,
+        configurable.research_model_max_tokens,
+        configurable,
+        config,
+    )
     
     # Prepare system prompt with MCP context if available
     researcher_prompt = research_system_prompt.format(
@@ -466,11 +559,56 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
     
     # Execute all tool calls in parallel
     tool_calls = most_recent_message.tool_calls
+    search_call_count = state.get("search_call_count", 0)
+    search_calls_this_step = 0
+
     async def execute_tool_call(tool_call):
+        nonlocal search_calls_this_step
         selected_tool = tools_by_name.get(tool_call["name"])
         if selected_tool is None:
             return f"Error executing tool: unknown tool '{tool_call['name']}'"
-        return await execute_tool_safely(selected_tool, tool_call["args"], config)
+        metadata = getattr(selected_tool, "metadata", {}) or {}
+        is_search = metadata.get("type") == "search" or tool_call["name"] in {
+            "tavily_search", "duckduckgo_search", "web_search"
+        }
+        if is_search:
+            if search_call_count + search_calls_this_step >= configurable.max_search_calls:
+                return "Search budget reached. Complete this unit with the collected sources."
+            search_calls_this_step += 1
+            search_terms = tool_call["args"].get("query") or tool_call["args"].get("queries")
+            if isinstance(search_terms, list):
+                search_terms = " / ".join(str(term) for term in search_terms)
+            await adispatch_custom_event(
+                "research_activity",
+                {
+                    "id": f"search:{tool_call['id']}",
+                    "type": "search.started",
+                    "status": "running",
+                    "title": "正在搜索资料",
+                    "detail": str(search_terms or tool_call["args"]),
+                    "source": metadata.get("source", tool_call["name"]),
+                    "search_index": search_call_count + search_calls_this_step,
+                    "search_budget": configurable.max_search_calls,
+                },
+                config=config,
+            )
+        result = await execute_tool_safely(selected_tool, tool_call["args"], config)
+        if is_search:
+            await adispatch_custom_event(
+                "research_activity",
+                {
+                    "id": f"search:{tool_call['id']}",
+                    "type": "search.completed",
+                    "status": "completed",
+                    "title": "搜索完成",
+                    "detail": "已获取并整理候选来源",
+                    "source": metadata.get("source", tool_call["name"]),
+                    "search_index": search_call_count + search_calls_this_step,
+                    "search_budget": configurable.max_search_calls,
+                },
+                config=config,
+            )
+        return result
 
     tool_execution_tasks = [execute_tool_call(call) for call in tool_calls]
     observations = await asyncio.gather(*tool_execution_tasks)
@@ -496,13 +634,19 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
         # End research and proceed to compression
         return Command(
             goto="compress_research",
-            update={"researcher_messages": tool_outputs}
+            update={
+                "researcher_messages": tool_outputs,
+                "search_call_count": search_call_count + search_calls_this_step,
+            }
         )
     
     # Continue research loop with tool results
     return Command(
         goto="researcher",
-        update={"researcher_messages": tool_outputs}
+        update={
+            "researcher_messages": tool_outputs,
+            "search_call_count": search_call_count + search_calls_this_step,
+        }
     )
 
 async def compress_research(state: ResearcherState, config: RunnableConfig):
@@ -521,12 +665,12 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     """
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
-    synthesizer_model = configurable_model.with_config({
-        "model": configurable.compression_model,
-        "max_tokens": configurable.compression_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.compression_model, config),
-        "tags": ["langsmith:nostream"]
-    })
+    synthesizer_model = configurable_model.with_config(_model_runtime_config(
+        configurable.compression_model,
+        configurable.compression_model_max_tokens,
+        configurable,
+        config,
+    ))
     
     # Step 2: Prepare messages for compression
     # Do not mutate the message list owned by the LangGraph state/checkpoint.
@@ -622,12 +766,12 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
-    writer_model_config = {
-        "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.final_report_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    writer_model_config = _model_runtime_config(
+        configurable.final_report_model,
+        configurable.final_report_model_max_tokens,
+        configurable,
+        config,
+    )
     
     # Step 3: Attempt report generation with token limit retry logic
     max_retries = 3
@@ -703,8 +847,10 @@ deep_researcher_builder = StateGraph(
 )
 
 # Add main workflow nodes for the complete research process
-deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)           # User clarification phase
-deep_researcher_builder.add_node("write_research_brief", write_research_brief)     # Research planning phase
+deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)
+deep_researcher_builder.add_node("request_clarification", request_clarification)
+deep_researcher_builder.add_node("write_research_plan", write_research_plan)
+deep_researcher_builder.add_node("review_research_plan", review_research_plan)
 deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)       # Research execution phase
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)  # Report generation phase
 
@@ -713,5 +859,5 @@ deep_researcher_builder.add_edge(START, "clarify_with_user")                    
 deep_researcher_builder.add_edge("research_supervisor", "final_report_generation") # Research to report
 deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
 
-# Compile the complete deep researcher workflow
-deep_researcher = deep_researcher_builder.compile()
+# Compile with checkpointing so clarification and plan approval can pause/resume.
+deep_researcher = deep_researcher_builder.compile(checkpointer=InMemorySaver())

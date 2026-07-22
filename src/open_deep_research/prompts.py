@@ -8,29 +8,38 @@ These are the messages that have been exchanged so far from the user asking for 
 
 Today's date is {date}.
 
-Assess whether you need to ask a clarifying question, or if the user has already provided enough information for you to start research.
-IMPORTANT: If you can see in the messages history that you have already asked a clarifying question, you almost always do not need to ask another one. Only ask another question if ABSOLUTELY NECESSARY.
+Assess whether the request is specific enough to create a useful research plan.
+IMPORTANT: If the history already contains the user's clarification or preferences, do not ask again.
 
 If there are acronyms, abbreviations, or unknown terms, ask the user to clarify.
-If you need to ask a question, follow these guidelines:
-- Be concise while gathering all necessary information
-- Make sure to gather all the information needed to carry out the research task in a concise, well-structured manner.
-- Use bullet points or numbered lists if appropriate for clarity. Make sure that this uses markdown formatting and will be rendered correctly if the string output is passed to a markdown renderer.
-- Don't ask for unnecessary information, or information that the user has already provided. If you can see that the user has already provided the information, do not ask for it again.
+Treat a request as ambiguous when important scope dimensions are missing, such as the time range, geography, audience, comparison targets, technical-vs-business emphasis, or desired output. A broad request like "research RAG trends" should normally be clarified. A request that already supplies the important dimensions should proceed directly.
+
+If clarification is useful:
+- Write in the same language as the user.
+- Provide a warm one-sentence intro.
+- Ask 2-4 specific, non-redundant questions.
+- Provide 3-6 short selectable focus options.
+- Never demand an answer: the UI always lets the user skip.
 
 Respond in valid JSON format with these exact keys:
 "need_clarification": boolean,
-"question": "<question to ask the user to clarify the report scope>",
+"intro": "<short introduction>",
+"questions": ["<question>", "<question>"],
+"suggested_focus": ["<short focus option>", "<short focus option>"],
 "verification": "<verification message that we will start research>"
 
 If you need to ask a clarifying question, return:
 "need_clarification": true,
-"question": "<your clarifying question>",
+"intro": "<your introduction>",
+"questions": ["<your questions>"],
+"suggested_focus": ["<your focus options>"],
 "verification": ""
 
 If you do not need to ask a clarifying question, return:
 "need_clarification": false,
-"question": "",
+"intro": "",
+"questions": [],
+"suggested_focus": [],
 "verification": "<acknowledgement message that you will now start research based on the provided information>"
 
 For the verification message when no clarification is needed:
@@ -365,4 +374,23 @@ Example 2 (for a scientific article):
 Remember, your goal is to create a summary that can be easily understood and utilized by a downstream research agent while preserving the most critical information from the original webpage.
 
 Today's date is {date}.
+"""
+
+
+research_plan_prompt = """Create a concrete research plan from the conversation below.
+
+<Messages>
+{messages}
+</Messages>
+
+Today's date is {date}.
+The maximum search budget per research unit is {max_search_calls}.
+
+Return a structured plan in the same language as the user. The plan must:
+- have a concise title and an objective that makes scope and assumptions explicit;
+- contain 3-8 non-overlapping sections in a logical order;
+- incorporate every user clarification or revision request;
+- prioritize primary, official, and recent sources where appropriate;
+- estimate a realistic number of searches without exceeding the configured budget;
+- describe what will be investigated, not conclusions that have not yet been researched.
 """

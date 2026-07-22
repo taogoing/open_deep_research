@@ -1,6 +1,7 @@
 """Utility functions and helpers for the Deep Research agent."""
 
 import asyncio
+import json
 import logging
 import os
 import warnings
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import aiohttp
+from duckduckgo_search import DDGS
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -83,12 +85,15 @@ async def tavily_search(
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
+    model_kwargs = {
+        "model": configurable.summarization_model,
+        "max_tokens": configurable.summarization_model_max_tokens,
+        "api_key": model_api_key,
+        "tags": ["langsmith:nostream"],
+    }
+    if configurable.summarization_model.lower().startswith("ollama:"):
+        model_kwargs["base_url"] = configurable.ollama_base_url
+    summarization_model = init_chat_model(**model_kwargs).with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
     
@@ -528,6 +533,30 @@ async def load_mcp_tools(
 # Tool Utils
 ##########################
 
+@tool("duckduckgo_search")
+async def duckduckgo_search(queries: List[str], max_results: int = 5) -> str:
+    """Search the public web with DuckDuckGo and return deduplicated results."""
+    def run_query(query: str):
+        with DDGS() as client:
+            return list(client.text(query, max_results=max_results))
+
+    batches = await asyncio.gather(*(asyncio.to_thread(run_query, query) for query in queries))
+    seen: set[str] = set()
+    results = []
+    for query, batch in zip(queries, batches):
+        for item in batch:
+            url = item.get("href") or item.get("url") or ""
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            results.append({
+                "query": query,
+                "title": item.get("title", ""),
+                "url": url,
+                "content": item.get("body", ""),
+            })
+    return json.dumps(results, ensure_ascii=False)
+
 async def get_search_tool(search_api: SearchAPI):
     """Configure and return search tools based on the specified API provider.
     
@@ -555,7 +584,17 @@ async def get_search_tool(search_api: SearchAPI):
         search_tool.metadata = {
             **(search_tool.metadata or {}), 
             "type": "search", 
-            "name": "web_search"
+            "name": "web_search",
+            "source": "tavily",
+        }
+        return [search_tool]
+
+    elif search_api == SearchAPI.DUCKDUCKGO:
+        search_tool = duckduckgo_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "source": "duckduckgo",
         }
         return [search_tool]
         
@@ -580,9 +619,10 @@ async def get_all_tools(config: RunnableConfig):
     
     # Add configured search tools
     configurable = Configuration.from_runnable_config(config)
-    search_api = SearchAPI(get_config_value(configurable.search_api))
-    search_tools = await get_search_tool(search_api)
-    tools.extend(search_tools)
+    for search_api_value in configurable.search_apis:
+        search_api = SearchAPI(get_config_value(search_api_value))
+        search_tools = await get_search_tool(search_api)
+        tools.extend(search_tools)
     
     # Track existing tool names to prevent conflicts
     existing_tool_names = {

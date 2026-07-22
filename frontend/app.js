@@ -1,0 +1,585 @@
+(() => {
+  "use strict";
+
+  const CONFIG_KEY = "odr.config.v3";
+  const DATA_KEY = "odr.workspace.v3";
+  const PHASES = ["scope", "plan", "research", "report"];
+  const PHASE_LABELS = {
+    scope: ["理解问题", "判断是否需要澄清"],
+    plan: ["制定方案", "等待确认研究大纲"],
+    research: ["检索与分析", "并行搜索并交叉验证"],
+    report: ["生成报告", "整理结论与引用"],
+  };
+  const PRESETS = {
+    quick: { max_search_calls: 4, max_concurrent_research_units: 2, max_researcher_iterations: 3, max_react_tool_calls: 6 },
+    standard: { max_search_calls: 8, max_concurrent_research_units: 5, max_researcher_iterations: 6, max_react_tool_calls: 10 },
+    deep: { max_search_calls: 16, max_concurrent_research_units: 7, max_researcher_iterations: 9, max_react_tool_calls: 16 },
+  };
+  const DEFAULT_CONFIG = {
+    depth: "standard",
+    search_apis: ["tavily"],
+    max_search_calls: 8,
+    max_concurrent_research_units: 5,
+    max_researcher_iterations: 6,
+    max_react_tool_calls: 10,
+    allow_clarification: true,
+    model_provider: "deepseek",
+    model_name: "deepseek:deepseek-chat",
+    same_model: true,
+    research_model: "deepseek:deepseek-chat",
+    summarization_model: "deepseek:deepseek-chat",
+    compression_model: "deepseek:deepseek-chat",
+    final_report_model: "deepseek:deepseek-chat",
+    ollama_base_url: "http://host.docker.internal:11434",
+    api_base: "/api",
+    theme: "light",
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    sidebar: $("sidebar"), mobileOverlay: $("mobileOverlay"), threadList: $("threadList"),
+    welcome: $("welcome"), messageStack: $("messageStack"), conversation: $("conversation"),
+    input: $("researchInput"), send: $("sendButton"), pageTitle: $("pageTitle"),
+    pageSubtitle: $("pageSubtitle"), runBadge: $("runBadge"), showReport: $("showReport"),
+    artifactPanel: $("artifactPanel"), artifactContent: $("artifactContent"),
+    settings: $("settingsDrawer"), drawerOverlay: $("drawerOverlay"), toast: $("toast"),
+  };
+
+  let config = loadJson(CONFIG_KEY, DEFAULT_CONFIG);
+  config = { ...DEFAULT_CONFIG, ...config };
+  let persisted = loadJson(DATA_KEY, {});
+  const state = {
+    threads: Array.isArray(persisted.threads) ? persisted.threads : [],
+    currentThreadId: persisted.currentThreadId || null,
+    messages: persisted.messages || {},
+    runs: persisted.runs || {},
+    reports: persisted.reports || {},
+    streaming: false,
+    controller: null,
+  };
+
+  function loadJson(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) || structuredClone(fallback); }
+    catch { return structuredClone(fallback); }
+  }
+
+  function persist() {
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+    localStorage.setItem(DATA_KEY, JSON.stringify({
+      threads: state.threads.slice(0, 30), currentThreadId: state.currentThreadId,
+      messages: state.messages, runs: state.runs, reports: state.reports,
+    }));
+  }
+
+  function escapeHtml(value = "") {
+    return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]);
+  }
+
+  function md(value = "") {
+    if (window.marked) return window.marked.parse(String(value), { breaks: true, gfm: true });
+    return `<p>${escapeHtml(value).replace(/\n/g, "<br>")}</p>`;
+  }
+
+  function timeLabel(ts = Date.now()) {
+    const d = new Date(ts);
+    return d.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" }) + " " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function toast(text) {
+    els.toast.textContent = text;
+    els.toast.classList.add("show");
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => els.toast.classList.remove("show"), 2200);
+  }
+
+  function api(path) {
+    return `${String(config.api_base || "/api").replace(/\/$/, "")}${path}`;
+  }
+
+  function currentMessages() {
+    if (!state.currentThreadId) return [];
+    return state.messages[state.currentThreadId] || (state.messages[state.currentThreadId] = []);
+  }
+
+  function currentRun() {
+    return state.currentThreadId ? state.runs[state.currentThreadId] : null;
+  }
+
+  function addMessage(message) {
+    currentMessages().push({ id: crypto.randomUUID(), createdAt: Date.now(), ...message });
+    persist();
+    render();
+  }
+
+  function titleFromQuery(query) {
+    const compact = query.replace(/\s+/g, " ").trim();
+    return compact.length > 25 ? `${compact.slice(0, 25)}…` : compact;
+  }
+
+  async function createThread(query) {
+    const response = await fetch(api("/threads"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: titleFromQuery(query) || "新研究" }),
+    });
+    if (!response.ok) throw new Error(await response.text() || "创建研究失败");
+    const data = await response.json();
+    const thread = { id: data.thread_id || data.id, title: titleFromQuery(query), createdAt: Date.now(), updatedAt: Date.now() };
+    state.threads.unshift(thread);
+    state.currentThreadId = thread.id;
+    state.messages[thread.id] = [];
+    state.reports[thread.id] = "";
+    persist();
+    return thread.id;
+  }
+
+  function buildRuntimeConfig() {
+    const selected = config.search_apis.length ? config.search_apis : ["duckduckgo"];
+    const model = config.model_name.trim() || "deepseek:deepseek-chat";
+    const same = config.same_model;
+    return {
+      search_api: selected[0], search_apis: selected,
+      max_search_calls: Number(config.max_search_calls),
+      max_concurrent_research_units: Number(config.max_concurrent_research_units),
+      max_researcher_iterations: Number(config.max_researcher_iterations),
+      max_react_tool_calls: Number(config.max_react_tool_calls),
+      allow_clarification: Boolean(config.allow_clarification),
+      research_model: same ? model : config.research_model,
+      summarization_model: same ? model : config.summarization_model,
+      compression_model: same ? model : config.compression_model,
+      final_report_model: same ? model : config.final_report_model,
+      ollama_base_url: config.ollama_base_url,
+    };
+  }
+
+  function newRun() {
+    return {
+      status: "running", title: "正在理解研究问题", subtitle: "AI 正在判断问题是否需要澄清",
+      startedAt: Date.now(), searchCount: 0, budget: Number(config.max_search_calls),
+      phases: { scope: "running", plan: "pending", research: "pending", report: "pending" },
+      activities: [], pending: null,
+    };
+  }
+
+  async function startResearch() {
+    const query = els.input.value.trim();
+    if (!query || state.streaming) return;
+    els.input.value = "";
+    resizeInput();
+    try {
+      if (!state.currentThreadId || currentMessages().length) await createThread(query);
+      const thread = state.threads.find((item) => item.id === state.currentThreadId);
+      if (thread) { thread.title = titleFromQuery(query); thread.updatedAt = Date.now(); }
+      addMessage({ role: "user", kind: "text", content: query });
+      state.runs[state.currentThreadId] = newRun();
+      persist(); render();
+      await streamRequest(api(`/threads/${encodeURIComponent(state.currentThreadId)}/runs/stream`), {
+        messages: [{ role: "user", content: query }], configurable: buildRuntimeConfig(),
+      });
+    } catch (error) { handleError(error); }
+  }
+
+  async function resumeResearch(decision, messageId) {
+    if (state.streaming || !state.currentThreadId) return;
+    const message = currentMessages().find((item) => item.id === messageId);
+    if (message) { message.resolved = true; message.resolution = decision.action; }
+    const run = currentRun();
+    if (run) { run.status = "running"; run.pending = null; }
+    persist(); render();
+    try {
+      await streamRequest(api(`/threads/${encodeURIComponent(state.currentThreadId)}/runs/resume`), { resume: decision });
+    } catch (error) { handleError(error); }
+  }
+
+  async function streamRequest(url, body) {
+    state.streaming = true;
+    state.controller = new AbortController();
+    renderHeader();
+    const response = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body), signal: state.controller.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `请求失败 (${response.status})`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary;
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+        consumeEvent(block);
+      }
+    }
+    if (buffer.trim()) consumeEvent(buffer);
+    state.streaming = false; state.controller = null;
+    persist(); render();
+  }
+
+  function consumeEvent(block) {
+    let event = "message";
+    const dataLines = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) return;
+    let payload;
+    try { payload = JSON.parse(dataLines.join("\n")); }
+    catch { payload = { message: dataLines.join("\n") }; }
+    handleEvent(event, payload);
+  }
+
+  function handleEvent(event, payload) {
+    payload = payload || {};
+    const run = currentRun() || newRun();
+    state.runs[state.currentThreadId] = run;
+    if (event === "run") {
+      run.status = payload.status || "running";
+    } else if (event === "progress") {
+      const phase = payload.phase;
+      if (phase && run.phases[phase] !== undefined) {
+        for (const key of PHASES) {
+          if (PHASES.indexOf(key) < PHASES.indexOf(phase) && run.phases[key] !== "failed") run.phases[key] = "completed";
+        }
+        run.phases[phase] = payload.status || "running";
+      }
+      run.title = payload.title || run.title;
+      run.subtitle = payload.detail || payload.subtitle || PHASE_LABELS[phase]?.[1] || run.subtitle;
+    } else if (event === "activity") {
+      const activity = { id: payload.id || crypto.randomUUID(), at: Date.now(), status: payload.status || "running", ...payload };
+      const existing = run.activities.findIndex((item) => item.id === activity.id);
+      if (existing >= 0) run.activities[existing] = { ...run.activities[existing], ...activity };
+      else run.activities.push(activity);
+      if (payload.type === "search.started") run.searchCount += 1;
+      run.activities = run.activities.slice(-20);
+    } else if (event === "interaction") {
+      run.status = "waiting"; run.pending = payload.kind || payload.type;
+      if (run.pending === "research_plan") run.pending = "plan";
+      if (run.pending === "clarification") run.phases.scope = "running";
+      if (run.pending === "plan") { run.phases.scope = "completed"; run.phases.plan = "running"; }
+      const duplicate = currentMessages().some((item) => item.kind === run.pending && !item.resolved);
+      if (!duplicate) currentMessages().push({ id: crypto.randomUUID(), role: "assistant", kind: run.pending, data: payload, createdAt: Date.now(), resolved: false });
+    } else if (event === "report" || event === "report/partial") {
+      const chunk = payload.content || payload.delta || "";
+      state.reports[state.currentThreadId] = payload.full_content || `${state.reports[state.currentThreadId] || ""}${chunk}`;
+      upsertReportMessage(state.reports[state.currentThreadId]);
+      run.phases.research = "completed"; run.phases.report = "running";
+    } else if (event === "state") {
+      const finalReport = payload.final_report || payload.values?.final_report;
+      if (finalReport) { state.reports[state.currentThreadId] = finalReport; upsertReportMessage(finalReport); }
+    } else if (event === "error") {
+      run.status = "failed";
+      const active = PHASES.find((p) => run.phases[p] === "running");
+      if (active) run.phases[active] = "failed";
+      addSystemError(payload.message || payload.detail || "研究过程中发生错误");
+    } else if (event === "end") {
+      run.status = payload.status === "interrupted" ? "waiting" : (payload.status || "completed");
+      if (run.status === "completed") {
+        PHASES.forEach((p) => { run.phases[p] = "completed"; });
+        run.title = "研究已完成"; run.subtitle = "报告与来源已经整理完毕";
+      }
+    }
+    persist(); render();
+  }
+
+  function upsertReportMessage(content) {
+    const messages = currentMessages();
+    const existing = messages.find((item) => item.kind === "report");
+    if (existing) existing.content = content;
+    else messages.push({ id: crypto.randomUUID(), role: "assistant", kind: "report", content, createdAt: Date.now() });
+  }
+
+  function addSystemError(content) {
+    const messages = currentMessages();
+    if (!messages.some((item) => item.kind === "error" && item.content === content)) {
+      messages.push({ id: crypto.randomUUID(), role: "assistant", kind: "error", content, createdAt: Date.now() });
+    }
+  }
+
+  function handleError(error) {
+    state.streaming = false; state.controller = null;
+    const run = currentRun();
+    if (run) {
+      run.status = "failed";
+      const active = PHASES.find((p) => run.phases[p] === "running");
+      if (active) run.phases[active] = "failed";
+    }
+    addSystemError(error?.message || "无法连接研究服务");
+    persist(); render();
+  }
+
+  function render() {
+    renderThreads(); renderMessages(); renderHeader(); renderArtifact(); updateConfigSummary();
+  }
+
+  function renderThreads() {
+    if (!state.threads.length) {
+      els.threadList.innerHTML = '<div class="thread-empty">还没有研究记录<br>从右侧提出一个问题开始</div>';
+      return;
+    }
+    els.threadList.innerHTML = state.threads.map((thread) => `
+      <div class="thread-item ${thread.id === state.currentThreadId ? "active" : ""}" data-thread="${escapeHtml(thread.id)}">
+        <span class="thread-icon">研</span><span class="thread-copy"><strong>${escapeHtml(thread.title || "未命名研究")}</strong><small>${timeLabel(thread.updatedAt || thread.createdAt)}</small></span>
+      </div>`).join("");
+  }
+
+  function renderMessages() {
+    const messages = currentMessages();
+    els.welcome.hidden = messages.length > 0;
+    const html = messages.map(renderMessage).join("");
+    const run = currentRun();
+    els.messageStack.innerHTML = html + (run ? renderRunCard(run) : "");
+    const pendingInteraction = [...messages].reverse().find((item) =>
+      ["clarification", "plan"].includes(item.kind) && !item.resolved
+    );
+    requestAnimationFrame(() => {
+      if (pendingInteraction) {
+        els.messageStack.querySelector(`[data-card="${pendingInteraction.id}"]`)?.scrollIntoView({ block: "start" });
+      } else {
+        els.conversation.scrollTop = els.conversation.scrollHeight;
+      }
+    });
+  }
+
+  function renderMessage(message) {
+    if (message.kind === "clarification") return renderClarification(message);
+    if (message.kind === "plan") return renderPlan(message);
+    const isUser = message.role === "user";
+    const body = message.kind === "error"
+      ? `<strong style="color:var(--danger)">运行失败</strong><p>${escapeHtml(message.content)}</p>`
+      : `<div class="md">${md(message.content || "")}</div>`;
+    return `<div class="message-row ${isUser ? "user" : "assistant"}">
+      <div class="avatar">${isUser ? "你" : "AI"}</div><div class="message-bubble">${body}</div></div>`;
+  }
+
+  function renderClarification(message) {
+    const data = message.data || {};
+    const clarification = data.clarification || data;
+    const questions = clarification.questions || [];
+    const options = clarification.suggested_focus || clarification.options || [];
+    return `<article class="interaction-card" data-card="${message.id}">
+      <div class="interaction-head"><span class="interaction-symbol">?</span><div><strong>先确认一下研究重点</strong><small>这能让检索范围和最终报告更贴近你的需求</small></div></div>
+      <div class="interaction-body">
+        <p class="interaction-intro">${escapeHtml(clarification.intro || "这个问题覆盖面较广，请选择你更关注的方向；也可以直接跳过，由 AI 采用综合视角。")}</p>
+        ${questions.length ? `<ol class="question-list">${questions.map((q) => `<li>${escapeHtml(q)}</li>`).join("")}</ol>` : ""}
+        ${options.length ? `<div class="focus-grid">${options.map((option, i) => `<label class="focus-chip"><input type="checkbox" value="${escapeHtml(option)}" id="focus-${message.id}-${i}"><span>${escapeHtml(option)}</span></label>`).join("")}</div>` : ""}
+        ${message.resolved ? `<div class="resolved-note">已提交：${message.resolution === "skip" ? "采用综合视角" : "已补充研究要求"}</div>` : `
+          <textarea class="feedback-input" placeholder="也可以直接输入时间范围、目标读者、重点行业或希望对比的对象…"></textarea>
+          <div class="interaction-actions"><button class="secondary-button" data-action="skip" data-id="${message.id}">跳过并生成大纲</button><button class="primary-button" data-action="supplement" data-id="${message.id}">提交补充要求</button></div>`}
+      </div></article>`;
+  }
+
+  function renderPlan(message) {
+    const data = message.data || {};
+    const plan = data.plan || data.research_plan || data;
+    const sections = plan.sections || [];
+    const estimated = plan.estimated_searches || currentRun()?.budget || config.max_search_calls;
+    return `<article class="interaction-card" data-card="${message.id}">
+      <div class="interaction-head"><span class="interaction-symbol">⌁</span><div><strong>研究方案已准备好</strong><small>确认后才会开始联网检索；不满意可以继续修改</small></div></div>
+      <div class="interaction-body">
+        <h3 class="plan-title">${escapeHtml(plan.title || "研究方案")}</h3>
+        <p class="plan-objective">${escapeHtml(plan.objective || "将围绕核心问题收集、交叉验证信息并形成结构化报告。")}</p>
+        <div class="plan-sections">${sections.map((section, index) => `<div class="plan-section"><span class="plan-number">${String(index + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(section.title || section)}</strong>${section.description ? `<p>${escapeHtml(section.description)}</p>` : ""}</div></div>`).join("")}</div>
+        <div class="plan-meta"><span class="meta-pill">预计最多 ${escapeHtml(estimated)} 次搜索 / 方向</span><span class="meta-pill">${escapeHtml(config.search_apis.join(" + "))}</span><span class="meta-pill">${escapeHtml(modelDisplay())}</span></div>
+        ${message.resolved ? `<div class="resolved-note">${message.resolution === "approve" ? "方案已确认，研究正在执行" : "修改要求已提交，AI 正在重拟大纲"}</div>` : `
+          <div class="plan-edit" hidden><textarea class="feedback-input" placeholder="例如：缩短技术历史部分，增加国内企业案例和成本对比…"></textarea></div>
+          <div class="interaction-actions"><button class="secondary-button" data-action="show-revise" data-id="${message.id}">修改方案</button><button class="primary-button" data-action="approve" data-id="${message.id}">确认并开始研究</button></div>`}
+      </div></article>`;
+  }
+
+  function renderRunCard(run) {
+    const completed = PHASES.filter((p) => run.phases[p] === "completed").length;
+    const pct = run.status === "completed" ? 100 : Math.round((completed + (PHASES.some((p) => run.phases[p] === "running") ? .35 : 0)) / PHASES.length * 100);
+    const labels = { running: "执行中", waiting: "等待确认", completed: "已完成", failed: "运行失败" };
+    const recent = run.activities.slice(-6).reverse();
+    return `<article class="run-card">
+      <div class="run-card-head"><span class="run-icon">⌁</span><span class="run-title"><strong>${escapeHtml(run.title || "研究任务")}</strong><small>${escapeHtml(run.subtitle || "正在准备")}</small></span><span class="run-state ${run.status}">${labels[run.status] || run.status}</span></div>
+      <div class="run-card-body"><div class="progress-overview"><div class="progress-track"><i style="width:${pct}%"></i></div><b>${pct}%</b></div>
+        <div class="phase-list">${PHASES.map((phase) => { const info = PHASE_LABELS[phase]; const status = run.phases[phase] || "pending"; return `<div class="phase-item ${status}"><span class="phase-dot">${status === "completed" ? "✓" : status === "failed" ? "!" : ""}</span><span class="phase-copy"><strong>${info[0]}</strong><small>${status === "running" ? info[1] : status === "completed" ? "已完成" : "等待中"}</small></span></div>`; }).join("")}</div>
+        ${recent.length ? `<div class="activity-section"><div class="activity-heading"><strong>实时活动</strong><span>已触发 ${run.searchCount} 次检索 · 每方向上限 ${run.budget}</span></div><div class="activity-list">${recent.map((item) => `<div class="activity-item ${item.status}"><i class="activity-mark"></i><span class="activity-copy"><strong>${escapeHtml(item.title || item.query || item.topic || "正在处理")}</strong><small>${escapeHtml(item.detail || item.message || activityDetail(item))}</small></span><span class="activity-source">${escapeHtml(item.source || item.type || "agent")}</span></div>`).join("")}</div></div>` : ""}
+      </div></article>`;
+  }
+
+  function activityDetail(item) {
+    if (item.type === "search.started") return "正在检索并筛选来源";
+    if (item.type === "search.completed") return "检索结果已交给研究智能体分析";
+    if (item.type === "research.unit.started") return "独立研究方向已启动";
+    if (item.type === "research.unit.completed") return "该方向的证据收集已经完成";
+    return item.status === "completed" ? "已完成" : "正在执行";
+  }
+
+  function renderHeader() {
+    const thread = state.threads.find((item) => item.id === state.currentThreadId);
+    const run = currentRun();
+    els.pageTitle.textContent = thread?.title || "新研究";
+    els.pageSubtitle.textContent = run ? (run.subtitle || "研究任务") : "从一个好问题开始";
+    const active = run && ["running", "waiting"].includes(run.status);
+    els.runBadge.hidden = !active;
+    if (active) els.runBadge.querySelector("b").textContent = run.status === "waiting" ? "等待确认" : "研究中";
+    els.send.disabled = state.streaming;
+    els.showReport.hidden = !state.currentThreadId || !state.reports[state.currentThreadId];
+  }
+
+  function renderArtifact() {
+    const report = state.currentThreadId ? state.reports[state.currentThreadId] : "";
+    els.artifactContent.innerHTML = report ? `<div class="md">${md(report)}</div>` : '<div class="artifact-empty">报告生成后将在这里显示</div>';
+  }
+
+  function openThread(id) {
+    state.currentThreadId = id; persist(); render(); closeMobileSidebar();
+  }
+
+  function newResearchView() {
+    if (state.streaming) { toast("当前研究仍在运行，请等待完成"); return; }
+    state.currentThreadId = null; persist(); render(); els.input.focus(); closeMobileSidebar();
+  }
+
+  function modelDisplay() {
+    if (config.model_provider === "ollama") return config.model_name.replace(/^ollama:/, "Ollama · ");
+    if (config.model_provider === "deepseek") return "DeepSeek";
+    return config.model_name;
+  }
+
+  function updateConfigSummary() {
+    const sourceNames = { tavily: "Tavily", duckduckgo: "DuckDuckGo", openai: "OpenAI Search", anthropic: "Anthropic Search" };
+    const depthNames = { quick: "快速", standard: "标准", deep: "深度", custom: "自定义" };
+    $("configSummary").innerHTML = `<span class="model-dot"></span>${escapeHtml(modelDisplay())} · ${escapeHtml(config.search_apis.map((x) => sourceNames[x] || x).join(" + "))} · ${depthNames[config.depth] || "自定义"}研究`;
+  }
+
+  function applyConfigToForm() {
+    document.querySelectorAll("[data-depth]").forEach((button) => button.classList.toggle("active", button.dataset.depth === config.depth));
+    $("searchBudget").value = config.max_search_calls; $("searchBudgetValue").textContent = config.max_search_calls;
+    $("concurrency").value = config.max_concurrent_research_units; $("concurrencyValue").textContent = config.max_concurrent_research_units;
+    document.querySelectorAll('input[name="source"]').forEach((input) => { input.checked = config.search_apis.includes(input.value); });
+    $("modelProvider").value = config.model_provider; $("modelName").value = config.model_name;
+    $("ollamaBaseUrl").value = config.ollama_base_url; $("sameModel").checked = config.same_model;
+    $("researchModel").value = config.research_model; $("summarizationModel").value = config.summarization_model;
+    $("compressionModel").value = config.compression_model; $("reportModel").value = config.final_report_model;
+    $("allowClarification").checked = config.allow_clarification; $("apiBase").value = config.api_base;
+    toggleProviderFields(); toggleAdvancedModels();
+  }
+
+  function collectConfig() {
+    const sources = [...document.querySelectorAll('input[name="source"]:checked')].map((input) => input.value);
+    if (!sources.length) throw new Error("请至少选择一个搜索来源");
+    const modelName = $("modelName").value.trim();
+    if (!modelName) throw new Error("请填写模型标识");
+    return {
+      ...config, depth: document.querySelector("[data-depth].active")?.dataset.depth || "custom",
+      search_apis: sources, max_search_calls: Number($("searchBudget").value),
+      max_concurrent_research_units: Number($("concurrency").value),
+      allow_clarification: $("allowClarification").checked,
+      model_provider: $("modelProvider").value, model_name: modelName,
+      same_model: $("sameModel").checked, ollama_base_url: $("ollamaBaseUrl").value.trim(),
+      research_model: $("researchModel").value.trim() || modelName,
+      summarization_model: $("summarizationModel").value.trim() || modelName,
+      compression_model: $("compressionModel").value.trim() || modelName,
+      final_report_model: $("reportModel").value.trim() || modelName,
+      api_base: $("apiBase").value.trim() || "/api",
+    };
+  }
+
+  function toggleProviderFields() {
+    const provider = $("modelProvider").value;
+    $("ollamaSettings").hidden = provider !== "ollama";
+    if (provider === "deepseek" && !$("modelName").value.startsWith("deepseek:")) $("modelName").value = "deepseek:deepseek-chat";
+    if (provider === "ollama" && !$("modelName").value.startsWith("ollama:")) $("modelName").value = "ollama:";
+  }
+
+  function toggleAdvancedModels() { $("advancedModels").hidden = $("sameModel").checked; }
+
+  function openSettings() { applyConfigToForm(); els.settings.classList.add("open"); els.drawerOverlay.classList.add("open"); }
+  function closeSettings() { els.settings.classList.remove("open"); els.drawerOverlay.classList.remove("open"); }
+
+  async function refreshOllama() {
+    const status = $("ollamaStatus");
+    status.className = "connection-status"; status.innerHTML = "<span></span>正在连接 Ollama…";
+    try {
+      const response = await fetch(api(`/providers/ollama/models?base_url=${encodeURIComponent($("ollamaBaseUrl").value.trim())}`));
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      const models = data.models || [];
+      $("ollamaModel").innerHTML = models.length ? models.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("") : '<option value="">没有发现本地模型</option>';
+      status.className = "connection-status connected"; status.innerHTML = `<span></span>连接成功，发现 ${models.length} 个模型`;
+      if (models.length) { $("ollamaModel").value = models[0]; $("modelName").value = `ollama:${models[0]}`; }
+    } catch (error) {
+      status.className = "connection-status failed"; status.innerHTML = `<span></span>${escapeHtml(error.message || "无法连接 Ollama")}`;
+    }
+  }
+
+  function resizeInput() { els.input.style.height = "auto"; els.input.style.height = `${Math.min(els.input.scrollHeight, 130)}px`; }
+  function openMobileSidebar() { els.sidebar.classList.add("mobile-open"); els.mobileOverlay.classList.add("open"); }
+  function closeMobileSidebar() { els.sidebar.classList.remove("mobile-open"); els.mobileOverlay.classList.remove("open"); }
+
+  function handleInteractionClick(event) {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const card = button.closest("[data-card]");
+    const id = button.dataset.id;
+    if (button.dataset.action === "show-revise") {
+      const editor = card.querySelector(".plan-edit");
+      if (editor.hidden) {
+        editor.hidden = false;
+        button.textContent = "提交修改";
+        editor.querySelector("textarea").focus();
+        return;
+      }
+      const feedback = editor.querySelector("textarea").value.trim();
+      if (!feedback) { toast("请先填写希望如何修改"); return; }
+      resumeResearch({ action: "revise", feedback }, id);
+      return;
+    }
+    if (button.dataset.action === "approve") return resumeResearch({ action: "approve" }, id);
+    if (button.dataset.action === "skip") return resumeResearch({ action: "skip" }, id);
+    if (button.dataset.action === "supplement") {
+      const selected = [...card.querySelectorAll('.focus-chip input:checked')].map((input) => input.value);
+      const feedback = card.querySelector("textarea")?.value.trim() || "";
+      if (!selected.length && !feedback) { toast("请选择关注方向或填写补充要求"); return; }
+      return resumeResearch({ action: "supplement", selected, feedback }, id);
+    }
+  }
+
+  function bindEvents() {
+    els.send.addEventListener("click", startResearch);
+    els.input.addEventListener("input", resizeInput);
+    els.input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); startResearch(); } });
+    els.messageStack.addEventListener("click", handleInteractionClick);
+    els.threadList.addEventListener("click", (event) => { const item = event.target.closest("[data-thread]"); if (item) openThread(item.dataset.thread); });
+    document.querySelectorAll(".prompt-suggestion").forEach((button) => button.addEventListener("click", () => { els.input.value = button.dataset.prompt; resizeInput(); els.input.focus(); }));
+    $("newResearch").addEventListener("click", newResearchView);
+    $("sidebarCollapse").addEventListener("click", () => els.sidebar.classList.toggle("collapsed"));
+    $("mobileMenu").addEventListener("click", openMobileSidebar); els.mobileOverlay.addEventListener("click", closeMobileSidebar);
+    [$("openSettings"), $("headerSettings"), $("configSummary")].forEach((el) => el.addEventListener("click", openSettings));
+    $("closeSettings").addEventListener("click", closeSettings); els.drawerOverlay.addEventListener("click", closeSettings);
+    document.querySelectorAll("[data-depth]").forEach((button) => button.addEventListener("click", () => {
+      document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b === button));
+      const preset = PRESETS[button.dataset.depth];
+      if (preset) { $("searchBudget").value = preset.max_search_calls; $("concurrency").value = preset.max_concurrent_research_units; $("searchBudgetValue").textContent = preset.max_search_calls; $("concurrencyValue").textContent = preset.max_concurrent_research_units; }
+    }));
+    $("searchBudget").addEventListener("input", (event) => { $("searchBudgetValue").textContent = event.target.value; document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b.dataset.depth === "custom")); });
+    $("concurrency").addEventListener("input", (event) => { $("concurrencyValue").textContent = event.target.value; document.querySelectorAll("[data-depth]").forEach((b) => b.classList.toggle("active", b.dataset.depth === "custom")); });
+    $("modelProvider").addEventListener("change", toggleProviderFields); $("sameModel").addEventListener("change", toggleAdvancedModels);
+    $("ollamaModel").addEventListener("change", (event) => { if (event.target.value) $("modelName").value = `ollama:${event.target.value}`; });
+    $("refreshOllama").addEventListener("click", refreshOllama);
+    $("saveSettings").addEventListener("click", () => { try { config = collectConfig(); persist(); updateConfigSummary(); applyTheme(); closeSettings(); toast("研究设置已保存"); } catch (error) { toast(error.message); } });
+    $("resetSettings").addEventListener("click", () => { config = structuredClone(DEFAULT_CONFIG); applyConfigToForm(); toast("已恢复默认设置，保存后生效"); });
+    $("themeToggle").addEventListener("click", () => { config.theme = config.theme === "dark" ? "light" : "dark"; applyTheme(); persist(); });
+    $("showReport").addEventListener("click", () => els.artifactPanel.classList.add("open"));
+    $("closeReport").addEventListener("click", () => els.artifactPanel.classList.remove("open"));
+    $("copyReport").addEventListener("click", async () => { const report = state.reports[state.currentThreadId] || ""; await navigator.clipboard.writeText(report); toast("报告已复制"); });
+    $("downloadReport").addEventListener("click", () => { const report = state.reports[state.currentThreadId] || ""; const blob = new Blob([report], { type: "text/markdown;charset=utf-8" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${state.threads.find((t) => t.id === state.currentThreadId)?.title || "研究报告"}.md`; a.click(); URL.revokeObjectURL(a.href); });
+  }
+
+  function applyTheme() {
+    document.documentElement.dataset.theme = config.theme;
+    $("themeGlyph").textContent = config.theme === "dark" ? "☀" : "☾";
+    $("themeLabel").textContent = config.theme === "dark" ? "浅色模式" : "深色模式";
+  }
+
+  applyTheme(); applyConfigToForm(); bindEvents(); render(); resizeInput();
+})();

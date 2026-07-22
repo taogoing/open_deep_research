@@ -33,8 +33,16 @@ class ClarifyWithUser(BaseModel):
     need_clarification: bool = Field(
         description="Whether the user needs to be asked a clarifying question.",
     )
-    question: str = Field(
-        description="A question to ask the user to clarify the report scope",
+    intro: str = Field(
+        description="A warm, concise introduction explaining what needs clarification.",
+    )
+    questions: list[str] = Field(
+        default_factory=list,
+        description="Two to four concrete questions that would improve the research scope.",
+    )
+    suggested_focus: list[str] = Field(
+        default_factory=list,
+        description="Three to six short focus options the user can select.",
     )
     verification: str = Field(
         description="Verify message that we will start research after the user has provided the necessary information.",
@@ -45,6 +53,29 @@ class ResearchQuestion(BaseModel):
     
     research_brief: str = Field(
         description="A research question that will be used to guide the research.",
+    )
+
+
+class ResearchPlanSection(BaseModel):
+    """One user-visible section of a proposed research plan."""
+
+    title: str = Field(description="Short section title.")
+    description: str = Field(description="What this section will investigate.")
+
+
+class ResearchPlan(BaseModel):
+    """Structured research plan shown to the user before execution."""
+
+    title: str = Field(description="Concise report title.")
+    objective: str = Field(description="One-paragraph research objective and scope.")
+    sections: list[ResearchPlanSection] = Field(
+        min_length=3,
+        max_length=8,
+        description="Ordered report sections.",
+    )
+    estimated_searches: int = Field(
+        ge=1,
+        description="Estimated number of web searches within the configured budget.",
     )
 
 
@@ -66,6 +97,9 @@ class AgentState(MessagesState):
     """Main agent state containing messages and research data."""
     
     supervisor_messages: Annotated[list[MessageLikeRepresentation], override_reducer]
+    clarification: Optional[ClarifyWithUser]
+    research_plan: Optional[ResearchPlan]
+    plan_revision_count: int = 0
     research_brief: Optional[str]
     raw_notes: Annotated[list[str], override_reducer] = []
     notes: Annotated[list[str], override_reducer] = []
@@ -85,6 +119,7 @@ class ResearcherState(TypedDict):
     
     researcher_messages: Annotated[list[MessageLikeRepresentation], operator.add]
     tool_call_iterations: int = 0
+    search_call_count: int = 0
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []

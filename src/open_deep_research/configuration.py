@@ -14,6 +14,7 @@ class SearchAPI(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
+    DUCKDUCKGO = "duckduckgo"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -81,12 +82,23 @@ class Configuration(BaseModel):
                 "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
                 "options": [
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
+                    {"label": "DuckDuckGo", "value": SearchAPI.DUCKDUCKGO.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
                 ]
             }
         }
+    )
+    search_apis: List[SearchAPI] = Field(
+        default_factory=lambda: [SearchAPI.TAVILY],
+        description="Search providers enabled for a research run.",
+    )
+    max_search_calls: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        description="Maximum search calls made by each research unit.",
     )
     max_researcher_iterations: int = Field(
         default=6,
@@ -207,6 +219,10 @@ class Configuration(BaseModel):
             }
         }
     )
+    ollama_base_url: str = Field(
+        default="http://host.docker.internal:11434",
+        description="Base URL of the Ollama service as seen by the backend.",
+    )
     # MCP server configuration
     mcp_config: Optional[MCPConfig] = Field(
         default=None,
@@ -234,6 +250,8 @@ class Configuration(BaseModel):
     ) -> "Configuration":
         """Create a Configuration instance from a RunnableConfig."""
         configurable = config.get("configurable", {}) if config else {}
+        if "search_api" in configurable and "search_apis" not in configurable:
+            configurable = {**configurable, "search_apis": [configurable["search_api"]]}
         field_names = list(cls.model_fields.keys())
         values: dict[str, Any] = {
             field_name: os.environ.get(field_name.upper(), configurable.get(field_name))

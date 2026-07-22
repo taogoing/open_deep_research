@@ -1,21 +1,20 @@
-"""FastAPI server wrapping the Open Deep Research LangGraph agent.
-
-Replaces ``langgraph dev`` with a standalone FastAPI + uvicorn server
-that provides the same SSE streaming API the frontend expects.
-"""
+"""Standalone FastAPI server for the checkpointed deep-research graph."""
 
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
+from langgraph.types import Command
 
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.deep_researcher import deep_researcher
@@ -25,26 +24,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("open_deep_research.server")
 
 app = FastAPI(title="Open Deep Research API")
-
-# ── In-memory thread storage ──────────────────────────────────
 threads: dict[str, dict[str, Any]] = {}
 
 
-# ── Helpers ────────────────────────────────────────────────────
-
-def _to_langchain_message(m: dict[str, Any]):
-    """Convert a frontend role-based message dict into a LangChain message."""
-    role = m.get("role", "")
-    content = m.get("content", "")
-    if role in ("human", "user"):
-        return HumanMessage(content=content)
-    if role in ("ai", "assistant"):
-        return AIMessage(content=content)
-    return HumanMessage(content=content)
-
-
 def _message_to_wire(message: BaseMessage | dict[str, Any]) -> dict[str, Any]:
-    """Convert LangChain messages to the compact shape used by the frontend."""
     if isinstance(message, dict):
         return message
     role = "assistant" if message.type in ("ai", "assistant") else "user"
@@ -52,22 +35,26 @@ def _message_to_wire(message: BaseMessage | dict[str, Any]) -> dict[str, Any]:
 
 
 def _json_safe(value: Any) -> Any:
-    """Recursively make LangGraph state safe for JSON/SSE transport."""
     if isinstance(value, BaseMessage):
         return _message_to_wire(value)
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
     if hasattr(value, "model_dump"):
         return _json_safe(value.model_dump())
+    if hasattr(value, "value") and not isinstance(value, (str, int, float, bool)):
+        return _json_safe(value.value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
 
 
-def _validate_runtime_config(configurable: dict[str, Any]) -> None:
-    """Fail early with actionable credential/provider errors."""
+def _sse(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(_json_safe(data), ensure_ascii=False)}\n\n"
+
+
+def _validate_runtime_config(configurable: dict[str, Any]) -> Configuration:
     config = Configuration.from_runnable_config({"configurable": configurable})
     runnable_config = {"configurable": configurable}
     model_fields = (
@@ -88,189 +75,171 @@ def _validate_runtime_config(configurable: dict[str, Any]) -> None:
             f"{provider}_API_KEY 后重启服务。"
         )
 
-    search_api = config.search_api
-    if search_api == SearchAPI.TAVILY and not get_tavily_api_key(runnable_config):
-        raise ValueError("Tavily 搜索缺少凭据，请在 .env 中设置 TAVILY_API_KEY 后重启服务。")
-    if search_api == SearchAPI.OPENAI and not config.research_model.startswith("openai:"):
-        raise ValueError("OpenAI 原生搜索只能搭配 OpenAI 研究模型；DeepSeek 请使用 Tavily 或 MCP 搜索。")
-    if search_api == SearchAPI.ANTHROPIC and not config.research_model.startswith("anthropic:"):
-        raise ValueError("Anthropic 原生搜索只能搭配 Anthropic 研究模型；DeepSeek 请使用 Tavily 或 MCP 搜索。")
+    sources = set(config.search_apis)
+    if SearchAPI.TAVILY in sources and not get_tavily_api_key(runnable_config):
+        raise ValueError("Tavily 搜索缺少凭据，请设置 TAVILY_API_KEY 后重启服务。")
+    if SearchAPI.OPENAI in sources and not config.research_model.startswith("openai:"):
+        raise ValueError("OpenAI 原生搜索只能搭配 OpenAI 研究模型。")
+    if SearchAPI.ANTHROPIC in sources and not config.research_model.startswith("anthropic:"):
+        raise ValueError("Anthropic 原生搜索只能搭配 Anthropic 研究模型。")
+    return config
 
 
 def _friendly_error(exc: Exception) -> str:
-    """Avoid exposing a provider traceback when a concise fix is available."""
     message = str(exc)
     lowered = message.lower()
     if "missing credentials" in lowered and "openai" in lowered:
-        return "OpenAI 模型缺少凭据。请改用 deepseek:deepseek-chat，或设置 OPENAI_API_KEY。"
+        return "OpenAI 模型缺少凭据。请改用 DeepSeek，或设置 OPENAI_API_KEY。"
+    if "connection refused" in lowered and "11434" in lowered:
+        return "无法连接 Ollama。请确认 Ollama 已启动，并检查服务地址。"
     if "authentication" in lowered or "api key" in lowered:
         return f"模型或搜索服务认证失败：{message}"
     return message
 
 
 def _extract_streaming_text(chunk: Any) -> str | None:
-    """Extract the text delta from a streaming chunk across all major providers."""
-    if hasattr(chunk, "content") and isinstance(chunk.content, str):
-        return chunk.content or None
-
-    if hasattr(chunk, "content") and isinstance(chunk.content, list):
-        for block in chunk.content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                if text:
-                    return text
-
-    if hasattr(chunk, "additional_kwargs"):
-        ak = chunk.additional_kwargs or {}
-        if isinstance(ak, dict):
-            block = ak.get("content_block") or {}
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                if text:
-                    return text
-
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content or None
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                return block["text"]
     return None
 
 
-# Node names the frontend maps to step-indicator labels
-_STEP_NODES = {
-    "clarify_with_user",
-    "write_research_brief",
-    "research_supervisor",
-    "final_report_generation",
+STEP_META = {
+    "clarify_with_user": ("scope", "理解研究问题"),
+    "request_clarification": ("scope", "等待补充研究范围"),
+    "write_research_plan": ("plan", "生成研究方案"),
+    "review_research_plan": ("plan", "等待确认研究方案"),
+    "research_supervisor": ("research", "执行深度研究"),
+    "final_report_generation": ("report", "生成最终报告"),
 }
 
 
-def _match_step_node(name: str) -> str | None:
-    """Return the canonical step-node name if *name* matches one."""
-    if not name:
-        return None
-    # exact match
-    if name in _STEP_NODES:
+def _match_step(name: str) -> str | None:
+    if name in STEP_META:
         return name
-    # subgraph internal nodes often appear as "research_supervisor:supervisor" etc.
-    for step in _STEP_NODES:
-        if name.startswith(step):
-            return step
+    return next((step for step in STEP_META if name.startswith(step)), None)
+
+
+def _progress(step: str, status: str) -> dict[str, Any]:
+    phase, title = STEP_META[step]
+    return {
+        "type": "phase.updated",
+        "phase": phase,
+        "step": step,
+        "status": status,
+        "title": title,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _extract_interrupt(snapshot: Any) -> dict[str, Any] | None:
+    for task in getattr(snapshot, "tasks", ()):
+        for item in getattr(task, "interrupts", ()):
+            value = getattr(item, "value", None)
+            if isinstance(value, dict):
+                return _json_safe(value)
     return None
 
 
-# ── SSE event generator ────────────────────────────────────────
-
 async def _research_event_stream(
-    thread_id: str, input_data: dict[str, Any]
+    thread_id: str,
+    *,
+    input_data: dict[str, Any] | None = None,
+    resume_data: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Execute the Deep Researcher graph and yield SSE events."""
-    new_messages = input_data.get("input", {}).get("messages", [])
-    thread = threads.setdefault(thread_id, {"messages": [], "state": {}})
-    thread["messages"].extend(new_messages)
+    """Run or resume one graph thread and expose a stable product event stream."""
+    thread = threads.setdefault(thread_id, {
+        "state": {}, "configurable": {}, "pending": None,
+        "status": "idle", "activities": [],
+    })
+    if input_data is not None:
+        configurable = (
+            input_data.get("configurable")
+            or input_data.get("config", {}).get("configurable", {})
+        )
+        thread["configurable"] = configurable
+        new_messages = input_data.get("messages") or input_data.get("input", {}).get("messages", [])
+        graph_input: Any = {
+            "messages": [HumanMessage(content=item.get("content", "")) for item in new_messages]
+        }
+    else:
+        configurable = thread.get("configurable", {})
+        graph_input = Command(resume=resume_data or {})
 
-    configurable = input_data.get("config", {}).get("configurable", {})
-    run_config: dict[str, Any] = {"configurable": configurable}
-
-    input_state = {
-        "messages": [_to_langchain_message(m) for m in thread["messages"]]
-    }
+    run_config = {"configurable": {**configurable, "thread_id": thread_id}}
     active_step: str | None = None
-    latest_state: dict[str, Any] = dict(thread.get("state", {}))
+    thread["status"] = "running"
+    thread["pending"] = None
 
     try:
         _validate_runtime_config(configurable)
-        async for event in deep_researcher.astream_events(
-            input_state, run_config, version="v2"
-        ):
-            kind: str = event.get("event", "")
-            name: str = event.get("name", "")
-            data: dict[str, Any] = event.get("data", {})
+        yield _sse("run", {"status": "running", "thread_id": thread_id})
 
-            # ── Node progress → updates ─────────────────────────
+        async for event in deep_researcher.astream_events(graph_input, run_config, version="v2"):
+            kind = event.get("event", "")
+            name = event.get("name", "")
+            data = event.get("data", {}) or {}
+            metadata = event.get("metadata", {}) or {}
+
             if kind == "on_chain_start":
-                matched = _match_step_node(name)
+                matched = _match_step(name)
                 if matched:
                     active_step = matched
-                    logger.info("Step start: %s (raw name=%s)", matched, name)
-                    yield (
-                        f"event: updates\n"
-                        f"data: {json.dumps({matched: {'status': 'active'}})}\n\n"
-                    )
+                    yield _sse("progress", _progress(matched, "running"))
 
-            # ── Token streaming → messages/partial ──────────────
-            metadata = event.get("metadata", {}) or {}
-            stream_node = _match_step_node(str(metadata.get("langgraph_node", "")))
-            if kind == "on_chat_model_stream" and stream_node == "final_report_generation":
-                chunk = data.get("chunk")
-                if chunk is not None:
-                    text = _extract_streaming_text(chunk)
-                    if text:
-                        payload = [[
-                            "messages/partial",
-                            [{"content": text, "type": "AIMessageChunk"}],
-                        ]]
-                        yield (
-                            f"event: messages/partial\n"
-                            f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                        )
-
-            # ── Node output → values ────────────────────────────
             if kind == "on_chain_end":
-                matched = _match_step_node(name)
-                if matched:
-                    output = data.get("output", {})
-                    if isinstance(output, dict):
-                        safe_output = _json_safe(output)
-                        latest_state.update(safe_output)
-                        logger.info(
-                            "Step end: %s  keys=%s", matched, list(output.keys())[:8]
-                        )
-                        yield (
-                            f"event: values\n"
-                            f"data: {json.dumps(safe_output, ensure_ascii=False)}\n\n"
-                        )
-                    yield (
-                        f"event: updates\n"
-                        f"data: {json.dumps({matched: {'status': 'done'}})}\n\n"
-                    )
+                matched = _match_step(name)
+                if matched and matched not in {"request_clarification", "review_research_plan"}:
+                    yield _sse("progress", _progress(matched, "completed"))
                     if active_step == matched:
                         active_step = None
 
-                # The root graph end contains the most complete state snapshot.
-                root_output = data.get("output")
-                if isinstance(root_output, dict) and (
-                    "messages" in root_output or "final_report" in root_output
-                ):
-                    latest_state.update(_json_safe(root_output))
+            if kind == "on_custom_event" and name == "research_activity":
+                activity = _json_safe(data)
+                if isinstance(activity, dict) and "data" in activity and len(activity) == 1:
+                    activity = activity["data"]
+                activity = {**activity, "timestamp": datetime.now(timezone.utc).isoformat()}
+                thread["activities"].append(activity)
+                thread["activities"] = thread["activities"][-200:]
+                yield _sse("activity", activity)
 
-        if latest_state.get("messages"):
-            thread["messages"] = latest_state["messages"]
-        thread["state"] = latest_state
-        yield f"event: end\ndata: {json.dumps(None)}\n\n"
+            stream_node = _match_step(str(metadata.get("langgraph_node", "")))
+            if kind == "on_chat_model_stream" and stream_node == "final_report_generation":
+                text = _extract_streaming_text(data.get("chunk"))
+                if text:
+                    yield _sse("report/partial", {"content": text})
+
+        snapshot = await deep_researcher.aget_state(run_config)
+        state = _json_safe(snapshot.values or {})
+        thread["state"] = state
+        pending = _extract_interrupt(snapshot)
+
+        if pending:
+            thread["pending"] = pending
+            thread["status"] = "waiting"
+            yield _sse("interaction", pending)
+            yield _sse("run", {"status": "waiting", "interaction": pending.get("type")})
+            return
+
+        thread["status"] = "completed"
+        yield _sse("state", state)
+        yield _sse("end", {"status": "completed"})
 
     except Exception as exc:
         logger.exception("Research stream error")
-        failed_step = active_step or "clarify_with_user"
-        yield (
-            f"event: updates\n"
-            f"data: {json.dumps({failed_step: {'status': 'failed'}})}\n\n"
-        )
-        yield f"event: error\ndata: {json.dumps(_friendly_error(exc), ensure_ascii=False)}\n\n"
+        thread["status"] = "failed"
+        if active_step:
+            yield _sse("progress", _progress(active_step, "failed"))
+        yield _sse("error", {"message": _friendly_error(exc)})
 
 
-# ── Routes ─────────────────────────────────────────────────────
-
-@app.post("/threads")
-async def create_thread():
-    """Create a new conversation thread."""
-    thread_id = str(uuid.uuid4())
-    threads[thread_id] = {"messages": [], "state": {}}
-    return {"thread_id": thread_id}
-
-
-@app.post("/threads/{thread_id}/runs/stream")
-async def run_stream(thread_id: str, request: Request):
-    """Stream a research run as SSE."""
-    input_data: dict[str, Any] = await request.json()
+def _stream_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
     return StreamingResponse(
-        _research_event_stream(thread_id, input_data),
+        generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -280,16 +249,60 @@ async def run_stream(thread_id: str, request: Request):
     )
 
 
+@app.post("/threads")
+async def create_thread():
+    thread_id = str(uuid.uuid4())
+    threads[thread_id] = {
+        "state": {}, "configurable": {}, "pending": None,
+        "status": "idle", "activities": [],
+    }
+    return {"thread_id": thread_id}
+
+
+@app.post("/threads/{thread_id}/runs/stream")
+async def run_stream(thread_id: str, request: Request):
+    return _stream_response(_research_event_stream(thread_id, input_data=await request.json()))
+
+
+@app.post("/threads/{thread_id}/runs/resume")
+async def resume_stream(thread_id: str, request: Request):
+    if thread_id not in threads:
+        raise HTTPException(status_code=404, detail="研究任务不存在")
+    if not threads[thread_id].get("pending"):
+        raise HTTPException(status_code=409, detail="当前研究任务没有等待中的确认")
+    payload = await request.json()
+    return _stream_response(
+        _research_event_stream(thread_id, resume_data=payload.get("resume", payload))
+    )
+
+
 @app.get("/threads/{thread_id}/state")
 async def get_state(thread_id: str):
-    """Return the latest state snapshot for a thread."""
     thread = threads.get(thread_id)
-    return {"values": thread.get("state", {}) if thread else {}}
+    if not thread:
+        return {"values": {}, "status": "missing", "pending": None, "activities": []}
+    return {
+        "values": thread.get("state", {}),
+        "status": thread.get("status", "idle"),
+        "pending": thread.get("pending"),
+        "activities": thread.get("activities", []),
+    }
+
+
+@app.get("/providers/ollama/models")
+async def ollama_models(base_url: str = "http://host.docker.internal:11434"):
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            response.raise_for_status()
+        models = [item.get("name") for item in response.json().get("models", []) if item.get("name")]
+        return {"status": "connected", "base_url": base_url, "models": models}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"无法连接 Ollama：{exc}") from exc
 
 
 @app.get("/ok")
 async def health():
-    """Health-check endpoint."""
     return {"status": "ok"}
 
 
